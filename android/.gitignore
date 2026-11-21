@@ -1,0 +1,20 @@
+# Gradle / IDE
+.gradle/
+.kotlin/
+.idea/
+*.iml
+.cxx/
+app/.cxx/
+captures/
+
+# Machine-specific
+local.properties
+
+# Release signing: never commit the key or its passwords
+signing/
+signing.properties
+*.jks
+*.keystore
+
+# Local analysis output
+tmp/

@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- PLAN §9. Keys must match Prefs.kt. -->
+<PreferenceScreen xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <PreferenceCategory
+        app:iconSpaceReserved="false"
+        app:title="@string/cat_camera">
+        <ListPreference
+            app:defaultValue="1920x1080"
+            app:entries="@array/resolution_entries"
+            app:entryValues="@array/resolution_values"
+            app:iconSpaceReserved="false"
+            app:key="resolution"
+            app:title="@string/pref_resolution"
+            app:useSimpleSummaryProvider="true" />
+        <ListPreference
+            app:defaultValue="0"
+            app:entries="@array/fps_entries"
+            app:entryValues="@array/fps_values"
+            app:iconSpaceReserved="false"
+            app:key="fps"
+            app:title="@string/pref_fps"
+            app:useSimpleSummaryProvider="true" />
+        <ListPreference
+            app:defaultValue="0"
+            app:entries="@array/exposure_entries"
+            app:entryValues="@array/exposure_values"
+            app:iconSpaceReserved="false"
+            app:key="exposure_ev"
+            app:title="@string/pref_exposure" />
+    </PreferenceCategory>
+
+    <PreferenceCategory
+        app:iconSpaceReserved="false"
+        app:title="@string/cat_decode">
+        <ListPreference
+            app:defaultValue="0"
+            app:entries="@array/threads_entries"
+            app:entryValues="@array/threads_values"
+            app:iconSpaceReserved="false"
+            app:key="threads"
+            app:title="@string/pref_threads" />
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:iconSpaceReserved="false"
+            app:key="decimen"
+            app:summary="@string/pref_decimen_summary"
+            app:title="@string/pref_decimen" />
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:iconSpaceReserved="false"
+            app:key="plain_qr"
+            app:summary="@string/pref_plain_summary"
+            app:title="@string/pref_plain" />
+    </PreferenceCategory>
+
+    <PreferenceCategory
+        app:iconSpaceReserved="false"
+        app:title="@string/cat_result">
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:iconSpaceReserved="false"
+            app:key="auto_copy"
+            app:summary="@string/pref_auto_copy_summary"
+            app:title="@string/pref_auto_copy" />
+        <SwitchPreferenceCompat
+            app:defaultValue="false"
+            app:iconSpaceReserved="false"
+            app:isPreferenceVisible="false"
+            app:key="auto_save"
+            app:summary="@string/pref_auto_save_summary"
+            app:title="@string/pref_auto_save" />
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:iconSpaceReserved="false"
+            app:key="vibrate"
+            app:title="@string/pref_vibrate" />
+        <SwitchPreferenceCompat
+            app:defaultValue="false"
+            app:iconSpaceReserved="false"
+            app:key="sound"
+            app:title="@string/pref_sound" />
+    </PreferenceCategory>
+
+    <PreferenceCategory
+        app:iconSpaceReserved="false"
+        app:title="@string/cat_other">
+        <SwitchPreferenceCompat
+            app:defaultValue="true"
+            app:iconSpaceReserved="false"
+            app:key="keep_screen_on"
+            app:title="@string/pref_keep_screen_on" />
+    </PreferenceCategory>
+
+    <PreferenceCategory
+        app:iconSpaceReserved="false"
+        app:key="cat_debug"
+        app:isPreferenceVisible="false"
+        app:title="@string/cat_debug">
+        <SwitchPreferenceCompat
+            app:defaultValue="false"
+            app:iconSpaceReserved="false"
+            app:key="debug_dump_frames"
+            app:summary="@string/pref_dump_frames_summary"
+            app:title="@string/pref_dump_frames" />
+    </PreferenceCategory>
+
+    <PreferenceCategory
+        app:iconSpaceReserved="false"
+        app:title="@string/cat_about">
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="version"
+            app:selectable="false"
+            app:title="@string/pref_version" />
+        <Preference
+            app:iconSpaceReserved="false"
+            app:key="licenses"
+            app:summary="@string/pref_licenses_summary"
+            app:title="@string/pref_licenses" />
+    </PreferenceCategory>
+</PreferenceScreen>

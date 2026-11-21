@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Fallbacks only: SettingsActivity replaces both lists with what the camera reports. -->
+    <string-array name="resolution_entries" translatable="false">
+        <item>1280×720</item>
+        <item>1920×1080</item>
+        <item>2560×1440</item>
+        <item>3840×2160</item>
+    </string-array>
+    <string-array name="resolution_values" translatable="false">
+        <item>1280x720</item>
+        <item>1920x1080</item>
+        <item>2560x1440</item>
+        <item>3840x2160</item>
+    </string-array>
+
+    <string-array name="fps_entries">
+        <item>@string/fps_auto</item>
+        <item>30 fps</item>
+        <item>60 fps</item>
+    </string-array>
+    <string-array name="fps_values" translatable="false">
+        <item>0</item>
+        <item>30</item>
+        <item>60</item>
+    </string-array>
+
+    <string-array name="exposure_entries" translatable="false">
+        <item>−2 EV</item>
+        <item>−1.5 EV</item>
+        <item>−1 EV</item>
+        <item>−0.5 EV</item>
+        <item>0 EV</item>
+        <item>+0.5 EV</item>
+        <item>+1 EV</item>
+        <item>+1.5 EV</item>
+        <item>+2 EV</item>
+    </string-array>
+    <string-array name="exposure_values" translatable="false">
+        <item>-2</item>
+        <item>-1.5</item>
+        <item>-1</item>
+        <item>-0.5</item>
+        <item>0</item>
+        <item>0.5</item>
+        <item>1</item>
+        <item>1.5</item>
+        <item>2</item>
+    </string-array>
+
+    <string-array name="threads_entries">
+        <item>@string/threads_auto</item>
+        <item>1</item>
+        <item>2</item>
+        <item>3</item>
+        <item>4</item>
+        <item>5</item>
+        <item>6</item>
+    </string-array>
+    <string-array name="threads_values" translatable="false">
+        <item>0</item>
+        <item>1</item>
+        <item>2</item>
+        <item>3</item>
+        <item>4</item>
+        <item>5</item>
+        <item>6</item>
+    </string-array>
+</resources>

@@ -1,0 +1,13 @@
+build/
+build-*/
+tools/
+*.exe
+*.o
+*.obj
+.vs/
+
+# Agent tooling (installed locally)
+.agents/
+
+# Personal to-do lists
+TODOS_*.md

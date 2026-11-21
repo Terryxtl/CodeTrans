@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The app is Simplified Chinese only (CodeTransApp forces zh-CN); there are no other translations. -->
+<resources>
+    <string name="app_name" translatable="false">CodeTrans</string>
+
+    <!-- Main screen -->
+    <string name="share">分享</string>
+    <string name="share_title">分享到</string>
+    <string name="preview_title">预览</string>
+    <string name="hint_idle">将相机对准电脑上的二维码</string>
+    <string name="camera_preview_desc">相机取景</string>
+    <string name="image_preview_desc">收到的图片</string>
+    <string name="preview_truncated">(预览只显示开头部分,完整内容请用分享)</string>
+    <string name="files_more">… 还有 %1$d 个文件</string>
+    <string name="image_unavailable">无法预览此图片</string>
+
+    <!-- Card title / status line words -->
+    <string name="kind_text">文本</string>
+    <string name="kind_plain">二维码</string>
+    <string name="kind_image">图片</string>
+    <string name="kind_files">%1$d 个文件</string>
+    <string name="kind_files_short">文件</string>
+    <string name="proto_plain">二维码</string>
+    <string name="codes_format">%d 码</string>
+
+    <!-- Permission -->
+    <string name="permission_rationale">CodeTrans 需要使用相机扫描电脑屏幕上的二维码。画面只在本机处理,不会上传。</string>
+    <string name="permission_denied_permanently">相机权限已被拒绝。请在系统设置中为 CodeTrans 开启相机权限。</string>
+    <string name="permission_grant">授予权限</string>
+    <string name="permission_open_settings">打开设置</string>
+
+    <!-- Snackbars -->
+    <string name="msg_failed">校验失败,正在重新接收</string>
+    <string name="msg_decimen_unsupported">无法接收:发送端的 Decimen 版本或功能不兼容,或内容超过上限</string>
+    <string name="msg_copied">已复制到剪贴板</string>
+    <string name="msg_too_large_to_copy">内容过大,请用分享</string>
+    <string name="msg_saved">已保存 %1$d 个文件到 下载/CodeTrans</string>
+    <string name="msg_save_failed">保存到 下载/CodeTrans 失败</string>
+    <string name="msg_share_failed">没有可分享的内容</string>
+    <string name="msg_thermal">设备过热,已降至 720p、单线程解码</string>
+    <string name="error_native">解码组件加载失败,此设备可能不受支持</string>
+    <string name="error_camera">无法打开相机</string>
+    <string name="detect_found">检测到 %1$d 个二维码,正在识别…</string>
+    <string name="detect_reading">已识别 %1$d / %2$d 个二维码,等待数据…</string>
+    <string name="detect_stuck">检测到 %1$d 个二维码,但无法识别:请靠近屏幕、横握手机让码更大,或在电脑端调大「模块」像素</string>
+    <string name="detect_stuck_short">黄框里的码识别不了:靠近屏幕、横握手机,或调大电脑端「模块」像素</string>
+
+    <!-- Settings -->
+    <string name="settings_title">设置</string>
+    <string name="navigate_up">返回</string>
+    <string name="cat_camera">相机</string>
+    <string name="cat_decode">解码</string>
+    <string name="cat_result">结果</string>
+    <string name="cat_other">其他</string>
+    <string name="cat_about">关于</string>
+    <string name="cat_debug">调试</string>
+    <string name="pref_resolution">分析分辨率</string>
+    <string name="pref_fps">相机帧率</string>
+    <string name="resolution_entry">%1$d×%2$d · %3$s · 最高 %4$d fps</string>
+    <string name="resolution_entry_nofps">%1$d×%2$d · %3$s</string>
+    <string name="fps_auto">自动(最高,不超过 60 fps)</string>
+    <string name="pref_exposure">曝光补偿</string>
+    <string name="pref_exposure_summary">%s(对着亮屏时 −0.5 到 −1 EV 识别率往往更高)</string>
+    <string name="pref_threads">解码线程数</string>
+    <string name="pref_decimen">接收 Decimen 码</string>
+    <string name="pref_decimen_summary">接收 decimen.app / decimen-cli 及 CodeTrans 电脑端发出的 Decimen v3 码(LT 与 RS96)</string>
+    <string name="pref_plain">识别普通二维码</string>
+    <string name="pref_plain_summary">把普通二维码的内容当作文本显示</string>
+    <string name="pref_auto_copy">收到文本自动复制</string>
+    <string name="pref_auto_copy_summary">100 KB 以内的文本自动复制到剪贴板</string>
+    <string name="pref_auto_save">文件自动保存到 下载/CodeTrans</string>
+    <string name="pref_auto_save_summary">收到图片或文件时另存一份到“下载/CodeTrans”</string>
+    <string name="pref_vibrate">完成时振动</string>
+    <string name="pref_sound">完成时提示音</string>
+    <string name="pref_keep_screen_on">扫码时屏幕常亮</string>
+    <string name="pref_version">版本</string>
+    <string name="pref_licenses">开源许可</string>
+    <string name="pref_licenses_summary">nanorq、quirc、ZXing-C++、miniz、Material Components、AndroidX</string>
+    <string name="pref_dump_frames">导出 Y 帧</string>
+    <string name="pref_dump_frames_summary">每 15 帧保存一帧原始亮度数据到 Android/data/com.codetrans/files/frames/(仅调试版)</string>
+    <string name="threads_auto">自动</string>
+    <string name="threads_auto_summary">自动(%1$d)</string>
+    <string name="licenses_body">Decimen Optical Transfer v0.5.3 / 0.5.3-fixed(Decimen v3 协议、LT 与 Cauchy RS-96 算法,移植为 C)— GNU AGPL-3.0-or-later\nnanorq — MIT License\nquirc — ISC License\nZXing-C++ — Apache License 2.0\nminiz — MIT License\nMaterial Components for Android — Apache License 2.0\nAndroidX(AppCompat、CameraX、Preference 等)— Apache License 2.0\nKotlin、kotlinx.coroutines — Apache License 2.0</string>
+    <string name="ok">确定</string>
+</resources>

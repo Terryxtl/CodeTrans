@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Only received results under <cacheDir>/rx/ are shareable. -->
+<paths>
+    <cache-path
+        name="rx"
+        path="rx/" />
+</paths>

@@ -1,0 +1,17 @@
+# Text is stored with LF; the working tree follows the platform (core.autocrlf).
+* text=auto
+
+# Shell scripts must stay LF even on Windows checkouts (run by Git Bash / CI).
+*.sh    text eol=lf
+gradlew text eol=lf
+*.bat   text eol=crlf
+
+# Binary assets.
+*.png binary
+*.ico binary
+*.jar binary
+
+# Test vectors and expected outputs are compared byte for byte: never convert.
+android/app/src/androidTest/assets/** binary
+core/tests/data/*.frames binary
+core/tests/data/*.expect binary
