@@ -55,15 +55,22 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            ndk {
-                abiFilters += listOf("arm64-v8a", "armeabi-v7a")
-            }
         }
         debug {
             ndk {
                 // x86_64 only for the emulator.
                 abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
             }
+        }
+    }
+
+    // Separate, smaller signed APKs for 32-bit ARM and 64-bit ARM.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("armeabi-v7a", "arm64-v8a")
+            isUniversalApk = false
         }
     }
 
