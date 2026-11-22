@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Send (phone -> PC) -->
+    <string name="send_take_photo">Take photo</string>
+    <string name="send_pick_image">Pick image</string>
+    <string name="send_pick_files">Pick files</string>
+    <string name="send_paste">Paste</string>
+    <string name="send_fps_value">%1$d fps</string>
+
+    <!-- Main screen: save / reset preview -->
+    <string name="save">Save</string>
+    <string name="reset_preview">Reset preview</string>
+    <string name="msg_save_done">Saved</string>
+    <string name="msg_save_done_many">Saved %1$d files</string>
+    <string name="msg_save_partial">Only %1$d files were saved, the rest failed</string>
+    <string name="msg_save_error">Could not save</string>
+    <string name="msg_save_nothing">Nothing to save</string>
+</resources>

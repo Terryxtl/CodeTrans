@@ -326,6 +326,39 @@ uint8_t *image_encode_jpeg(const uint8_t *bgra, int w, int h, BOOL alpha, int qu
     return membuf_finish(&m, ok, out_len);
 }
 
+int image_sample_colors(const uint8_t *bgra, int w, int h)
+{
+    enum { SLOTS = 4096 * 2, CAP = IMG_AUTO_PHOTO_COLORS * 2 };
+    uint32_t *set;
+    int n = 0, gx, gy, step_x, step_y;
+    if (!bgra || w <= 0 || h <= 0)
+        return 0;
+    set = (uint32_t *)calloc(SLOTS, sizeof *set);   /* 0 = empty; colours are stored | 1 << 31 */
+    if (!set)
+        return 0;
+    step_x = w > 64 ? w / 64 : 1;
+    step_y = h > 64 ? h / 64 : 1;
+    for (gy = step_y / 2; gy < h && n < CAP; gy += step_y)
+        for (gx = step_x / 2; gx < w && n < CAP; gx += step_x) {
+            const uint8_t *p = bgra + ((size_t)gy * w + gx) * 4;
+            uint32_t c = ((uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16) | 0x80000000u;
+            uint32_t k = (c * 2654435761u) >> 19;   /* 13 bits = SLOTS */
+            while (set[k] && set[k] != c)
+                k = (k + 1) & (SLOTS - 1);
+            if (!set[k]) {
+                set[k] = c;
+                n++;
+            }
+        }
+    free(set);
+    return n;
+}
+
+BOOL image_auto_prefers_jpeg(size_t png_len, size_t jpeg_len, int colors, BOOL alpha)
+{
+    return !alpha && colors >= IMG_AUTO_PHOTO_COLORS && jpeg_len > 0 && jpeg_len * 2 <= png_len;
+}
+
 uint8_t *image_make_dib(const uint8_t *bgra, int w, int h, size_t *out_len)
 {
     size_t row = (size_t)w * 4, len = sizeof(BITMAPINFOHEADER) + row * h;

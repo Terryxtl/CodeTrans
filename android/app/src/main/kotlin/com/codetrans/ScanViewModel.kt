@@ -4,6 +4,7 @@ import android.app.ActivityManager
 import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import android.os.SystemClock
 import android.util.Log
@@ -45,10 +46,10 @@ class ScanViewModel(app: Application) : AndroidViewModel(app) {
     private val pipeline = DecodePipeline(rx, ::onNativeEvents, ::onCodes)
     val analyzer get() = pipeline.analyzer
 
-    private val tracker = CodeTracker()
-    private val _codes = MutableStateFlow(CodeTracker.Snapshot.EMPTY)
+    private val tracker = QuadTracker()
+    private val _codes = MutableStateFlow(CodeSnapshot.EMPTY)
     /** Stabilised boxes of the codes in view (per frame, and pruned ~10 Hz). */
-    val codes: StateFlow<CodeTracker.Snapshot> = _codes.asStateFlow()
+    val codes: StateFlow<CodeSnapshot> = _codes.asStateFlow()
 
     private val _detection = MutableStateFlow(Detection.NONE)
     /** Summary of [codes] for the status line, ~10 Hz. */
@@ -73,7 +74,42 @@ class ScanViewModel(app: Application) : AndroidViewModel(app) {
     private val receiving = AtomicBoolean(false)
     @Volatile private var lastUnsupportedAt = 0L
     private var pollJob: Job? = null
+    private var progressJob: Job? = null
     private val progressBuf = LongArray(NativeCore.PROGRESS_SIZE)
+    /**
+     * Decoder threads signal every accepted symbol here; the main thread refreshes the progress
+     * at most every [PROGRESS_MIN_MS]. Polling alone (every 100 ms) left the bar up to 100 ms
+     * behind on top of the indicator's own animation, so short transfers finished while the
+     * bar still showed well under 100 %.
+     */
+    private val progressTick = Channel<Unit>(Channel.CONFLATED)
+
+    private val fpsMeter = FpsMeter()
+    private var fpsAt = 0L
+    private val _frameInfo = MutableStateFlow<FrameInfo?>(null)
+    /** Frame rate and analysis resolution for the overlay on the camera view, ~2 Hz; null = unknown. */
+    val frameInfo: StateFlow<FrameInfo?> = _frameInfo.asStateFlow()
+
+    /** Developer panel text (debug builds, while enabled), ~2 Hz; null = hidden. */
+    private val _diagnostics = MutableStateFlow<String?>(null)
+    val diagnostics: StateFlow<String?> = _diagnostics.asStateFlow()
+    /** The toolbar button expands (true) / collapses the panel; debug builds only. */
+    var diagnosticsEnabled = BuildConfig.DEBUG
+        set(value) {
+            field = value && BuildConfig.DEBUG
+            if (field) {
+                // Fresh figures: per-second rates against a reading from before the panel was
+                // collapsed would be averages over the whole time it was hidden.
+                diagPrev = null
+                diagAt = 0L
+            } else {
+                _diagnostics.value = null
+            }
+        }
+    private var diagPrev: DiagSnapshot? = null
+    private var diagAt = 0L
+    private val statsBuf = LongArray(NativeCore.STATS_SIZE)
+    private val diagProgressBuf = LongArray(NativeCore.PROGRESS_SIZE)
 
     /** Thermal status reached SEVERE: 1 decoder thread, 720p, 30 fps. */
     var thermalThrottled = false
@@ -119,6 +155,16 @@ class ScanViewModel(app: Application) : AndroidViewModel(app) {
                     delay(PROGRESS_INTERVAL_MS)
                     pollDetection()
                     pollProgress()
+                    pollFrameInfo()
+                    pollDiagnostics()
+                }
+            }
+        }
+        if (progressJob == null) {
+            progressJob = viewModelScope.launch {
+                for (tick in progressTick) {
+                    pollProgress()
+                    delay(PROGRESS_MIN_MS)
                 }
             }
         }
@@ -127,11 +173,16 @@ class ScanViewModel(app: Application) : AndroidViewModel(app) {
     fun stopScanning() {
         pollJob?.cancel()
         pollJob = null
+        progressJob?.cancel()
+        progressJob = null
         pipeline.stop()
         tracker.clear()
-        _codes.value = CodeTracker.Snapshot.EMPTY
+        _codes.value = CodeSnapshot.EMPTY
         _detection.value = Detection.NONE
         undecodedSince = 0L
+        fpsMeter.reset()
+        fpsAt = 0L
+        _frameInfo.value = null
     }
 
     /** Restart decoder threads (thread count changed). */
@@ -142,11 +193,14 @@ class ScanViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         stopScanning()
+        tracker.close()
         if (rx != 0L) {
             // Free rx only after every decoder thread has left scan().
             Thread({
-                if (pipeline.awaitStopped(5_000)) NativeCore.rxFree(rx)
-                else Log.w(TAG, "decoder threads still running; leaking rx")
+                if (pipeline.awaitStopped(5_000)) {
+                    pipeline.close()
+                    NativeCore.rxFree(rx)
+                } else Log.w(TAG, "decoder threads still running; leaking rx")
             }, "cp-rx-free").start()
         }
     }
@@ -154,7 +208,10 @@ class ScanViewModel(app: Application) : AndroidViewModel(app) {
     // ---- native events (decoder threads)
 
     private fun onNativeEvents(ev: Int) {
-        if (ev and NativeCore.EV_PROGRESS != 0) receiving.set(true)
+        if (ev and NativeCore.EV_PROGRESS != 0) {
+            receiving.set(true)
+            progressTick.trySend(Unit)
+        }
         if (ev and NativeCore.EV_COMPLETE != 0) {
             receiving.set(false)
             val n = NativeCore.takeResult(rx)
@@ -220,7 +277,58 @@ class ScanViewModel(app: Application) : AndroidViewModel(app) {
         ScanState.Idle -> "idle"
     }
 
-    /** Main thread, throttled to ~10 Hz. */
+    /** Main thread, every [FPS_INTERVAL_MS]: processed frames per second + analysis resolution. */
+    private fun pollFrameInfo() {
+        val now = SystemClock.uptimeMillis()
+        if (now - fpsAt < FPS_INTERVAL_MS) return
+        fpsAt = now
+        val p = pipeline.stats
+        val fps = fpsMeter.update(now, p.decoded.get())
+        val w = p.frameWidth
+        val h = p.frameHeight
+        if (fps != null && w > 0 && h > 0) _frameInfo.value = FrameInfo(fps, w, h)
+    }
+
+    /** Main thread, every [DIAG_INTERVAL_MS] while the developer panel is on. */
+    private fun pollDiagnostics() {
+        if (!diagnosticsEnabled) return
+        val now = SystemClock.uptimeMillis()
+        if (now - diagAt < DIAG_INTERVAL_MS) return
+        diagAt = now
+        if (rx != 0L) {
+            NativeCore.rxStats(rx, statsBuf)
+            NativeCore.progress(rx, diagProgressBuf)
+        }
+        val p = pipeline.stats
+        val snap = DiagSnapshot(
+            atMs = now,
+            cameraFrames = p.cameraFrames.get(),
+            cameraMissed = p.cameraMissed.get(),
+            queueDropped = p.queueDropped.get(),
+            decoded = p.decoded.get(),
+            scanNanos = p.scanNanos.get(),
+            rxFrames = statsBuf[NativeCore.S_FRAMES],
+            rxUnique = statsBuf[NativeCore.S_UNIQUE],
+            rxDuplicates = statsBuf[NativeCore.S_DUPLICATES],
+            rxRedundant = statsBuf[NativeCore.S_REDUNDANT],
+            rs96K = statsBuf[NativeCore.S_RS96_K],
+            rs96Rows = statsBuf[NativeCore.S_RS96_ROWS],
+            rs96Useful = statsBuf[NativeCore.S_RS96_USEFUL],
+            rs96Solved = statsBuf[NativeCore.S_RS96_SOLVED],
+            threads = pipeline.threads,
+            proto = diagProgressBuf[NativeCore.P_PROTO].toInt(),
+            codesInFrame = diagProgressBuf[NativeCore.P_CODES_IN_FRAME].toInt(),
+            obMode = statsBuf[NativeCore.S_OB_MODE],
+            obK = statsBuf[NativeCore.S_OB_K],
+            obRows = statsBuf[NativeCore.S_OB_ROWS],
+            obGroups = statsBuf[NativeCore.S_OB_GROUPS],
+            obSolved = statsBuf[NativeCore.S_OB_SOLVED],
+        )
+        _diagnostics.value = snap.format(diagPrev)
+        diagPrev = snap
+    }
+
+    /** Main thread: on accepted symbols (at most every [PROGRESS_MIN_MS]) and every 100 ms. */
     private fun pollProgress() {
         if (!receiving.get() || rx == 0L) return
         NativeCore.progress(rx, progressBuf)
@@ -259,6 +367,59 @@ class ScanViewModel(app: Application) : AndroidViewModel(app) {
                 else _events.trySend(UiEvent(R.string.msg_save_failed))
             }
         }
+    }
+
+    // ---- save (Storage Access Framework) and reset
+
+    /**
+     * What the Save button asked the system file picker for; kept here, not in the Activity,
+     * so the answer still finds it after a rotation.
+     */
+    var pendingSave: SavePlan? = null
+
+    /** The picker returned [uri]: write the pending result there; the outcome arrives as an event. */
+    fun save(uri: Uri) {
+        val plan = pendingSave ?: return
+        pendingSave = null
+        val app = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) {
+            val event = when (plan) {
+                is SavePlan.One ->
+                    UiEvent(if (SaveHelper.write(app, uri, plan)) R.string.msg_save_done else R.string.msg_save_error)
+                is SavePlan.Many -> {
+                    val n = SaveHelper.writeAll(app, uri, plan.files)
+                    when {
+                        n == plan.files.size -> UiEvent(R.string.msg_save_done_many, n)
+                        n > 0 -> UiEvent(R.string.msg_save_partial, n)
+                        else -> UiEvent(R.string.msg_save_error)
+                    }
+                }
+                SavePlan.None -> return@launch
+            }
+            _events.trySend(event)
+        }
+    }
+
+    /**
+     * The reset button of the preview card: back to the initial state. Forgets the result with
+     * [id] (and deletes its files), drops any transfer in progress together with its progress
+     * bar, and clears the native receiver's memory of finished transfers, so scanning the same
+     * file again is received anew from 0 %.
+     */
+    fun clearResult(id: Long) {
+        if (_state.value.result?.id != id) return
+        thumbCache = null
+        if (rx != 0L) NativeCore.rxReset(rx)
+        receiving.set(false)
+        // The same file comes back with the same session id; without this the never-backwards
+        // guard of pollProgress would show the old progress again.
+        progressSession = -1L
+        progressHave = 0L
+        _state.value = when (val s = _state.value) {
+            is ScanState.Error -> s.copy(last = null)
+            else -> ScanState.Idle
+        }
+        viewModelScope.launch(Dispatchers.IO) { store.clear(id) }
     }
 
     // ---- preview helpers
@@ -301,6 +462,11 @@ class ScanViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
         private const val TAG = "CodeTrans"
         private const val PROGRESS_INTERVAL_MS = 100L
+        /** Fastest progress refresh, ~30 Hz: about one display frame of a 30 fps sender. */
+        private const val PROGRESS_MIN_MS = 33L
+        private const val DIAG_INTERVAL_MS = 500L
+        /** The fps overlay is refreshed this often (each figure covers the last second). */
+        private const val FPS_INTERVAL_MS = 500L
         private const val UNSUPPORTED_INTERVAL_MS = 5_000L
         /** Codes in view this long without one decoding: tell the user how to fix it. */
         private const val STUCK_MS = 1_500L

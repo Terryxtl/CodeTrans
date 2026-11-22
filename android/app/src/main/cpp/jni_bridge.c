@@ -9,6 +9,7 @@
  *   sequences that are not valid "modified UTF-8" (CheckJNI would abort).
  */
 #include <jni.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,8 @@
 #include "cp.h"
 #include "scanner.h"
 #include "camera_scan.h"
+#include "confirmed_regions.h"
+#include "quad_tracker.h"
 
 #define TAG "CodeTrans"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
@@ -134,6 +137,49 @@ static jobjectArray new_string_array(JNIEnv *env, char **items, size_t count)
     return a;
 }
 
+/* ---- file names ------------------------------------------------------------ */
+
+/* Sanitizes UTF-8 file names (cp_sanitize_name) and makes them unique
+ * (cp_unique_name), exactly as the core does for every transfer. */
+JNIEXPORT jobjectArray JNICALL FN(sanitizeNames)(JNIEnv *env, jclass cls, jobjectArray names)
+{
+    jsize count, i;
+    char **out;
+    jobjectArray res = NULL;
+    (void)cls;
+    if (!names)
+        return NULL;
+    count = (*env)->GetArrayLength(env, names);
+    out = (char **)calloc(count ? (size_t)count : 1, sizeof *out);
+    if (!out)
+        return NULL;
+    for (i = 0; i < count; i++) {
+        jbyteArray b = (jbyteArray)(*env)->GetObjectArrayElement(env, names, i);
+        jsize n = b ? (*env)->GetArrayLength(env, b) : 0;
+        jbyte *buf = (jbyte *)malloc(n ? (size_t)n : 1);
+        out[i] = (char *)malloc(CP_NAME_MAX + 1);
+        if (!buf || !out[i]) {
+            free(buf);
+            if (b)
+                (*env)->DeleteLocalRef(env, b);
+            goto done;
+        }
+        if (n)
+            (*env)->GetByteArrayRegion(env, b, 0, n, buf);
+        cp_sanitize_name((const uint8_t *)buf, (size_t)n, out[i], CP_NAME_MAX + 1);
+        cp_unique_name(out[i], CP_NAME_MAX + 1, out, (size_t)i);
+        free(buf);
+        if (b)
+            (*env)->DeleteLocalRef(env, b);
+    }
+    res = new_string_array(env, out, (size_t)count);
+done:
+    for (i = 0; i < count; i++)
+        free(out[i]);
+    free(out);
+    return res;
+}
+
 /* ---- rx -------------------------------------------------------------------- */
 
 JNIEXPORT jlong JNICALL FN(rxNew)(JNIEnv *env, jclass cls, jstring outDir, jlong maxBytes,
@@ -223,68 +269,212 @@ JNIEXPORT void JNICALL FN(copyPlane)(JNIEnv *env, jclass cls, jobject src, jint 
 /* quads (optional): [count, then per code: decoded, x0, y0, x1, y1, x2, y2, x3, y3] */
 #define QUAD_INTS 9
 
-JNIEXPORT jint JNICALL FN(scan)(JNIEnv *env, jclass cls, jlong s, jlong rx, jobject y, jint w, jint h,
-                                jintArray quads, jintArray regions)
+static void put_quads(JNIEnv *env, const cp_scan_quad *q, int n, jintArray quads)
+{
+    jint buf[1 + CP_SCAN_MAX_QUADS * QUAD_INTS];
+    jint room = ((*env)->GetArrayLength(env, quads) - 1) / QUAD_INTS, i, k;
+    if (room < 0)
+        return;
+    if (n > room)
+        n = room;
+    buf[0] = n;
+    for (i = 0; i < n; i++) {
+        jint *o = buf + 1 + i * QUAD_INTS;
+        o[0] = q[i].decoded;
+        for (k = 0; k < 4; k++) {
+            o[1 + 2 * k] = q[i].x[k];
+            o[2 + 2 * k] = q[i].y[k];
+        }
+    }
+    (*env)->SetIntArrayRegion(env, quads, 0, 1 + n * QUAD_INTS, buf);
+}
+
+static const uint8_t *frame_pixels(JNIEnv *env, jobject y, jint w, jint h)
 {
     const uint8_t *p;
     jlong cap;
-    jint ev, n, i, k, room, buf[1 + CP_SCAN_MAX_QUADS * QUAD_INTS];
-    cp_scan_quad q[CP_SCAN_MAX_QUADS];
-    (void)cls;
-    if (!s || !rx || !y || w <= 0 || h <= 0)
-        return 0;
+    if (!y || w <= 0 || h <= 0)
+        return NULL;
     p = (const uint8_t *)(*env)->GetDirectBufferAddress(env, y);
     cap = (*env)->GetDirectBufferCapacity(env, y);
-    if (!p || cap < (jlong)w * h)
+    return p && cap >= (jlong)w * h ? p : NULL;
+}
+
+JNIEXPORT jint JNICALL FN(scan)(JNIEnv *env, jclass cls, jlong s, jlong rx, jobject y, jint w, jint h,
+                                jintArray quads)
+{
+    const uint8_t *p;
+    cp_scan_quad q[CP_SCAN_MAX_QUADS];
+    jint ev;
+    (void)cls;
+    if (!s || !rx || !(p = frame_pixels(env, y, w, h)))
         return 0;
-    if (regions) {
-        /* [count, {modules, driftPixels, x0,y0,...,x3,y3}...] */
-        jint packed[1 + 10 * CP_SCAN_MAX_QUADS];
-        cp_grid grids[CP_SCAN_MAX_QUADS];
-        if ((*env)->GetArrayLength(env, regions) != 1 + 10 * CP_SCAN_MAX_QUADS) return 0;
-        (*env)->GetIntArrayRegion(env, regions, 0, 1, packed);
-        int count = packed[0];
-        if (count < 0 || count > CP_SCAN_MAX_QUADS) return 0;
-        (*env)->GetIntArrayRegion(env, regions, 1, 10 * count, packed + 1);
-        for (i = 0; i < count; i++) {
-            const jint *a = packed + 1 + i * 10;
-            grids[i].size = a[0];
-            grids[i].drift = a[1] >= 0 && a[1] <= CP_SCAN_MAX_DIM ? a[1] : 0;
-            for (k = 0; k < 4; k++)
-                grids[i].corners[k] = (struct quirc_point){a[2 + 2*k], a[3 + 2*k]};
-        }
-        ev = cp_scan_seeded(H2P(cp_scanner, s), H2P(cp_rx, rx), p, w, h, grids, &count);
-        packed[0] = count;
-        for (i = 0; i < count; i++) {
-            jint *a = packed + 1 + i * 10;
-            a[0] = grids[i].size;
-            a[1] = 0;
-            for (k = 0; k < 4; k++) {
-                a[2 + 2*k] = grids[i].corners[k].x;
-                a[3 + 2*k] = grids[i].corners[k].y;
-            }
-        }
-        (*env)->SetIntArrayRegion(env, regions, 0, 1 + (count > 0 ? count * 10 : 0), packed);
-    } else {
-        ev = cp_scanner_scan(H2P(cp_scanner, s), H2P(cp_rx, rx), p, w, h, NULL);
-    }
-    if (quads) {
-        room = ((*env)->GetArrayLength(env, quads) - 1) / QUAD_INTS;
-        if (room >= 0) {
-            n = cp_scanner_last_quads(H2P(cp_scanner, s), q, room < CP_SCAN_MAX_QUADS ? room : CP_SCAN_MAX_QUADS);
-            buf[0] = n;
-            for (i = 0; i < n; i++) {
-                jint *o = buf + 1 + i * QUAD_INTS;
-                o[0] = q[i].decoded;
-                for (k = 0; k < 4; k++) {
-                    o[1 + 2 * k] = q[i].x[k];
-                    o[2 + 2 * k] = q[i].y[k];
-                }
-            }
-            (*env)->SetIntArrayRegion(env, quads, 0, 1 + n * QUAD_INTS, buf);
-        }
-    }
+    ev = cp_scanner_scan(H2P(cp_scanner, s), H2P(cp_rx, rx), p, w, h, NULL);
+    if (quads)
+        put_quads(env, q, cp_scanner_last_quads(H2P(cp_scanner, s), q, CP_SCAN_MAX_QUADS), quads);
     return ev;
+}
+
+/* ---- scan session: confirmed-region cache shared by the decoder threads ------- */
+
+typedef struct {
+    cp_scan_session s;
+    pthread_mutex_t m;
+} jni_session;
+
+static void session_lock(void *u)   { pthread_mutex_lock(&((jni_session *)u)->m); }
+static void session_unlock(void *u) { pthread_mutex_unlock(&((jni_session *)u)->m); }
+
+JNIEXPORT jlong JNICALL FN(sessionNew)(JNIEnv *env, jclass cls)
+{
+    jni_session *js = (jni_session *)calloc(1, sizeof *js);
+    cp_scan_lock lock;
+    (void)env; (void)cls;
+    if (!js)
+        return 0;
+    if (pthread_mutex_init(&js->m, NULL) != 0) {
+        free(js);
+        return 0;
+    }
+    lock.lock = session_lock;
+    lock.unlock = session_unlock;
+    lock.user = js;
+    cp_scan_session_init(&js->s, &lock);
+    return P2H(js);
+}
+
+JNIEXPORT void JNICALL FN(sessionFree)(JNIEnv *env, jclass cls, jlong h)
+{
+    jni_session *js = H2P(jni_session, h);
+    (void)env; (void)cls;
+    if (!js)
+        return;
+    pthread_mutex_destroy(&js->m);
+    free(js);
+}
+
+/* Geometry (frame size / rotation) changed or scanning restarted: forget every grid. */
+JNIEXPORT void JNICALL FN(sessionReset)(JNIEnv *env, jclass cls, jlong h, jlong firstFrame)
+{
+    jni_session *js = H2P(jni_session, h);
+    (void)env; (void)cls;
+    if (!js)
+        return;
+    pthread_mutex_lock(&js->m);
+    cp_scan_session_reset(&js->s, (uint64_t)firstFrame);
+    pthread_mutex_unlock(&js->m);
+}
+
+/* One call per frame: seeds from the session, scan, session updated. quads as in scan(). */
+JNIEXPORT jint JNICALL FN(scanStep)(JNIEnv *env, jclass cls, jlong s, jlong rx, jlong session, jobject y,
+                                    jint w, jint h, jlong frame, jlong timeMs, jintArray quads)
+{
+    const uint8_t *p;
+    cp_scan_quad q[CP_SCAN_MAX_QUADS];
+    int nq = 0;
+    jint ev;
+    (void)cls;
+    if (!s || !rx || !session || !(p = frame_pixels(env, y, w, h)))
+        return 0;
+    ev = cp_scan_session_step(&H2P(jni_session, session)->s, H2P(cp_scanner, s), H2P(cp_rx, rx), p, w, h,
+                              (uint64_t)frame, (uint64_t)timeMs, NULL, q, &nq);
+    if (quads)
+        put_quads(env, q, nq, quads);
+    return ev;
+}
+
+/* ---- preview outline tracker (not thread-safe: the Kotlin wrapper serialises) -- */
+
+/* trackerSnapshot out: [sighted, frameW, frameH, rotation, count,
+ *                       then per box: x0, y0 .. x3, y3, readNow (0/1), opacity] */
+#define TRACK_HEADER 5
+#define TRACK_BOX 10
+
+JNIEXPORT jlong JNICALL FN(trackerNew)(JNIEnv *env, jclass cls)
+{
+    cp_quad_tracker *t = (cp_quad_tracker *)calloc(1, sizeof *t);
+    (void)env; (void)cls;
+    if (t)
+        cp_quad_tracker_init(t);
+    return P2H(t);
+}
+
+JNIEXPORT void JNICALL FN(trackerFree)(JNIEnv *env, jclass cls, jlong h)
+{
+    (void)env; (void)cls;
+    free(H2P(cp_quad_tracker, h));
+}
+
+JNIEXPORT void JNICALL FN(trackerClear)(JNIEnv *env, jclass cls, jlong h)
+{
+    (void)env; (void)cls;
+    if (h)
+        cp_quad_tracker_reset(H2P(cp_quad_tracker, h));
+}
+
+/* quads: the layout filled by scan(). Returns false when the frame was older than the last one. */
+JNIEXPORT jboolean JNICALL FN(trackerUpdate)(JNIEnv *env, jclass cls, jlong h, jlong frameNo, jint w, jint fh,
+                                             jint rotation, jintArray quads, jlong now)
+{
+    jint buf[1 + CP_SCAN_MAX_QUADS * QUAD_INTS], n, i, k, len;
+    cp_scan_quad q[CP_SCAN_MAX_QUADS];
+    (void)cls;
+    if (!h || !quads)
+        return JNI_FALSE;
+    len = (*env)->GetArrayLength(env, quads);
+    if (len < 1)
+        return JNI_FALSE;
+    if (len > (jint)(sizeof buf / sizeof buf[0]))
+        len = (jint)(sizeof buf / sizeof buf[0]);
+    (*env)->GetIntArrayRegion(env, quads, 0, len, buf);
+    n = buf[0];
+    if (n < 0)
+        n = 0;
+    if (n > (len - 1) / QUAD_INTS)
+        n = (len - 1) / QUAD_INTS;
+    for (i = 0; i < n; i++) {
+        const jint *o = buf + 1 + i * QUAD_INTS;
+        q[i].decoded = o[0] != 0;
+        for (k = 0; k < 4; k++) {
+            q[i].x[k] = o[1 + 2 * k];
+            q[i].y[k] = o[2 + 2 * k];
+        }
+    }
+    return cp_quad_tracker_update(H2P(cp_quad_tracker, h), (uint64_t)frameNo, w, fh, rotation, q, n,
+                                  (uint64_t)now) ? JNI_TRUE : JNI_FALSE;
+}
+
+/* Only decode-confirmed boxes are listed (what the overlay draws); `sighted` also counts confirmed unread ones. */
+JNIEXPORT void JNICALL FN(trackerSnapshot)(JNIEnv *env, jclass cls, jlong h, jlong now, jfloatArray out)
+{
+    cp_quad_tracker *t = H2P(cp_quad_tracker, h);
+    cp_quad_view v[CP_TRACK_MAX];
+    jfloat buf[TRACK_HEADER + CP_TRACK_MAX * TRACK_BOX];
+    int sighted, shown = 0, i, k;
+    jsize room;
+    (void)cls;
+    if (!t || !out)
+        return;
+    sighted = cp_quad_tracker_view(t, (uint64_t)now, v, CP_TRACK_MAX);
+    room = ((*env)->GetArrayLength(env, out) - TRACK_HEADER) / TRACK_BOX;
+    if (room < 0)
+        return;
+    for (i = 0; i < sighted && shown < room; i++) {
+        jfloat *o = buf + TRACK_HEADER + shown * TRACK_BOX;
+        if (!v[i].ever_read)
+            continue;
+        for (k = 0; k < 8; k++)
+            o[k] = v[i].q[k];
+        o[8] = v[i].read ? 1.0f : 0.0f;
+        o[9] = v[i].opacity;
+        shown++;
+    }
+    buf[0] = (jfloat)sighted;
+    buf[1] = (jfloat)t->frame_w;
+    buf[2] = (jfloat)t->frame_h;
+    buf[3] = (jfloat)t->rotation;
+    buf[4] = (jfloat)shown;
+    (*env)->SetFloatArrayRegion(env, out, 0, TRACK_HEADER + shown * TRACK_BOX, buf);
 }
 
 /* ---- results ----------------------------------------------------------------- */
@@ -308,6 +498,36 @@ JNIEXPORT void JNICALL FN(progress)(JNIEnv *env, jclass cls, jlong rx, jlongArra
     v[7] = (jlong)p.session_id;   /* unsigned 32-bit, Kotlin masks */
     n = (*env)->GetArrayLength(env, out);
     (*env)->SetLongArrayRegion(env, out, 0, n < PROGRESS_SIZE ? n : PROGRESS_SIZE, v);
+}
+
+/* out: [frames, unique, duplicates, redundant, rs96K, rs96Rows, rs96Useful, rs96Solved,
+ *       obMode, obK, obRows, obGroups, obSolved] */
+#define STATS_SIZE 13
+
+JNIEXPORT void JNICALL FN(rxStats)(JNIEnv *env, jclass cls, jlong rx, jlongArray out)
+{
+    cp_rx_stats st;
+    jlong v[STATS_SIZE];
+    jsize n;
+    (void)cls;
+    if (!out)
+        return;
+    cp_rx_stats_get(H2P(cp_rx, rx), &st);
+    v[0] = (jlong)st.frames;
+    v[1] = (jlong)st.unique;
+    v[2] = (jlong)st.duplicates;
+    v[3] = (jlong)st.redundant;
+    v[4] = st.rs96_k;
+    v[5] = st.rs96_rows;
+    v[6] = st.rs96_useful;
+    v[7] = st.rs96_solved;
+    v[8] = st.ob_mode;
+    v[9] = st.ob_k;
+    v[10] = st.ob_rows;
+    v[11] = st.ob_groups;
+    v[12] = st.ob_solved;
+    n = (*env)->GetArrayLength(env, out);
+    (*env)->SetLongArrayRegion(env, out, 0, n < STATS_SIZE ? n : STATS_SIZE, v);
 }
 
 JNIEXPORT jbyteArray JNICALL FN(takePlain)(JNIEnv *env, jclass cls, jlong rx)

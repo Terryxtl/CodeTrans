@@ -16,6 +16,7 @@ file(GLOB _cp_winget_dirs
 list(APPEND _cp_hints ${_cp_winget_dirs})
 
 find_program(CMAKE_C_COMPILER  NAMES ${CP_MINGW_TRIPLE}-gcc ${CP_MINGW_TRIPLE}-clang HINTS ${_cp_hints} REQUIRED)
+find_program(CMAKE_CXX_COMPILER NAMES ${CP_MINGW_TRIPLE}-g++ ${CP_MINGW_TRIPLE}-clang++ HINTS ${_cp_hints} REQUIRED)
 find_program(CMAKE_RC_COMPILER NAMES ${CP_MINGW_TRIPLE}-windres HINTS ${_cp_hints} REQUIRED)
 
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)

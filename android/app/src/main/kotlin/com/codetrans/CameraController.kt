@@ -68,7 +68,19 @@ class CameraController(
         setupGestures()
     }
 
+    /**
+     * Bumped by every [start] and [stop]: a start whose provider lookup finishes after a later
+     * stop (or start) must not attach its analyzer.
+     *
+     * Not a lifecycle check: [start] is called from onStart(), where the lifecycle is still
+     * CREATED (ON_START is dispatched after onStart() returns), and once the provider is cached
+     * the coroutine below runs synchronously on Main.immediate. A STARTED check therefore
+     * skipped every start after the first one, e.g. when coming back from the settings page.
+     */
+    private var generation = 0
+
     fun start(config: Config, exposureEv: Float, analyzer: ImageAnalysis.Analyzer) {
+        val gen = ++generation
         owner.lifecycleScope.launch {
             val p = try {
                 provider ?: ProcessCameraProvider.awaitInstance(context).also { provider = it }
@@ -76,7 +88,7 @@ class CameraController(
                 onError(e)
                 return@launch
             }
-            if (!owner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) return@launch
+            if (gen != generation || owner.lifecycle.currentState == Lifecycle.State.DESTROYED) return@launch
             try {
                 if (camera == null || boundConfig != config) bind(p, config)
                 analysis?.setAnalyzer(analysisExecutor, analyzer)
@@ -90,6 +102,7 @@ class CameraController(
 
     /** Detaches the analyzer; the camera itself is closed by the lifecycle (ON_STOP). */
     fun stop() {
+        generation++
         analysis?.clearAnalyzer()
     }
 

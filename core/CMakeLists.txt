@@ -70,15 +70,35 @@ add_library(cp_core STATIC
   src/d3.c
   src/fec_rq.c
   src/frame_cp.c
+  src/ob.c
+  src/ob_fec.c
+  src/ob_locate.c
   src/output.c
   src/platform.c
   src/rx.c
   src/sha256.c
   src/tx.c
+  src/tx_render.c
 )
 target_include_directories(cp_core PUBLIC include PRIVATE src)
 target_compile_options(cp_core PRIVATE ${CPC_ARCH_OPTS} -Wall -Wextra -Wno-unused-parameter)
-target_link_libraries(cp_core PRIVATE cp_nanorq PUBLIC cp_miniz)
+target_link_libraries(cp_core PRIVATE cp_nanorq cp_qrcodegen PUBLIC cp_miniz)
+if(NOT WIN32)
+  target_link_libraries(cp_core PUBLIC m)   # ob_locate.c / ob.c: sqrt, hypot
+endif()
+
+# ---- camera scanner (quirc + tracking + contrast retry + optical boards) ----
+# Core contrast-retry tests exercise quirc in isolation. The Windows camera
+# builds the same sources with the optional ZXing fallback enabled.
+function(cp_add_scanner target)
+  set(dir "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/scan")
+  add_library(${target} STATIC "${dir}/scanner.c" "${dir}/tracked_grid.c" "${dir}/quad_tracker.c"
+    "${dir}/confirmed_regions.c")
+  target_include_directories(${target} PUBLIC "${dir}")
+  target_compile_options(${target} PRIVATE -Wall -Wextra -Wno-unused-parameter ${ARGN})
+  target_link_libraries(${target} PUBLIC cp_core cp_quirc)
+endfunction()
+cp_add_scanner(cp_scan ${CPC_ARCH_OPTS})
 
 # ---- desktop tests (encode -> render -> quirc -> rx) -----------------------
 option(CP_CORE_TESTS "Build core tests" ON)
@@ -86,7 +106,7 @@ if(CP_CORE_TESTS)
   add_executable(cp_core_tests tests/test_core.c)
   target_include_directories(cp_core_tests PRIVATE src)
   target_compile_options(cp_core_tests PRIVATE ${CPC_ARCH_OPTS} -Wall -Wextra -Wno-unused-parameter)
-  target_link_libraries(cp_core_tests PRIVATE cp_core cp_qrcodegen cp_quirc)
+  target_link_libraries(cp_core_tests PRIVATE cp_core cp_qrcodegen cp_quirc cp_scan)
   # Decimen golden vectors produced by the reference implementation
   target_compile_definitions(cp_core_tests PRIVATE CP_TEST_DATA="${CPC_DIR}/tests/data")
   # Decimen interoperability tool (frames files in / out), see tests/d3_tool.c

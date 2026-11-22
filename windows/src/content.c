@@ -167,14 +167,51 @@ static int build_image(const content *c, const build_opts *o, build_result *r)
     }
     r->img_w = w;
     r->img_h = h;
-    if (o->image_format == CFG_IMG_JPEG) {
+    if (o->image_format == CFG_IMG_AUTO) {
+        /* lossless unless the picture is a photo and JPEG halves the transfer */
+        int colors = image_sample_colors(bgra, w, h);
+        uint8_t *jpg = NULL;
+        size_t jpg_len = 0;
+        const uint8_t *png = NULL;
+        size_t png_len = 0;
+        if (c->type == CONTENT_IMAGE_PNG) {   /* the PNG that was copied: no re-encode */
+            png = c->data;
+            png_len = c->len;
+        } else {
+            enc = image_encode_png(bgra, w, h, alpha, &enc_len);
+            png = enc;
+            png_len = enc_len;
+        }
+        if (!alpha && colors >= IMG_AUTO_PHOTO_COLORS)
+            jpg = image_encode_jpeg(bgra, w, h, FALSE, o->jpeg_quality, &jpg_len);
+        free(bgra);
+        if (jpg && image_auto_prefers_jpeg(png ? png_len : (size_t)-1, jpg_len, colors, alpha)) {
+            free(enc);
+            enc = jpg;
+            enc_len = jpg_len;
+            lstrcpyA(r->mime, "image/jpeg");
+        } else if (png) {
+            free(jpg);
+            if (!enc) {                        /* the original PNG bytes */
+                r->payload = cp_payload_image(c->data, c->len, "image/png");
+                lstrcpyA(r->mime, "image/png");
+                if (!r->payload)
+                    wfmt(r->err, CPW_COUNTOF(r->err), L"图片打包失败");
+                return r->payload != NULL;
+            }
+            lstrcpyA(r->mime, "image/png");
+        } else {
+            free(jpg);
+        }
+    } else if (o->image_format == CFG_IMG_JPEG) {
         enc = image_encode_jpeg(bgra, w, h, alpha, o->jpeg_quality, &enc_len);
         lstrcpyA(r->mime, "image/jpeg");
+        free(bgra);
     } else {
         enc = image_encode_png(bgra, w, h, alpha, &enc_len);
         lstrcpyA(r->mime, "image/png");
+        free(bgra);
     }
-    free(bgra);
     if (!enc) {
         wfmt(r->err, CPW_COUNTOF(r->err), L"图片编码失败(内存不足?)");
         return 0;

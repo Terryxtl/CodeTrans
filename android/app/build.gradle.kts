@@ -10,6 +10,8 @@ plugins {
 val signingProps = rootProject.file("signing/signing.properties").takeIf { it.isFile }?.let { f ->
     Properties().apply { f.inputStream().use { load(it) } }
 }
+val splitReleaseApks = providers.gradleProperty("splitReleaseApks").map(String::toBoolean).getOrElse(false)
+val releaseAbis = listOf("armeabi-v7a", "arm64-v8a")
 
 android {
     namespace = "com.codetrans"
@@ -55,21 +57,23 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
+            if (!splitReleaseApks) {
+                ndk.abiFilters += releaseAbis
+            }
         }
         debug {
-            ndk {
-                // x86_64 only for the emulator.
-                abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            if (!splitReleaseApks) {
+                ndk.abiFilters += releaseAbis + "x86_64"
             }
         }
     }
 
-    // Separate, smaller signed APKs for 32-bit ARM and 64-bit ARM.
+    // AGP applies ABI splits to the whole module and disallows combining them with ndk.abiFilters.
     splits {
         abi {
-            isEnable = true
+            isEnable = splitReleaseApks
             reset()
-            include("armeabi-v7a", "arm64-v8a")
+            include(*releaseAbis.toTypedArray())
             isUniversalApk = false
         }
     }

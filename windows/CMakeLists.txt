@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(CodeTransWindows LANGUAGES C RC)
+project(CodeTransWindows LANGUAGES C CXX RC)
 
 # --------------------------------------------------------------------------
 # CodeTrans Windows sender (PLAN.md §7). From the repository root:
@@ -43,27 +43,33 @@ if(CP_ARCH STREQUAL "x86")
   list(APPEND CP_COPTS -msse2 -mfpmath=sse)
 endif()
 
+include("${CP_CORE_DIR}/scan/qr_fallback.cmake")
+cp_add_scanner(cpwin_scan ${CP_COPTS})
+cp_enable_qr_fallback(cpwin_scan)
+
 set(CP_LOPTS -municode -static -static-libgcc -s)
 if(CP_ARCH STREQUAL "x86")
   list(APPEND CP_LOPTS -Wl,--large-address-aware)
 endif()
 
-set(CP_SYSLIBS user32 gdi32 shell32 comctl32 dwmapi winmm advapi32)
+# ole32: COM for the camera (Media Foundation itself is loaded at run time, camera.c).
+set(CP_SYSLIBS user32 gdi32 shell32 comctl32 dwmapi winmm advapi32 ole32)
 
 # ---- helpers shared by the app and the test harness (no window code)
 add_library(cpwin_common STATIC
   src/config.c
   src/content.c
-  src/frame_render.c
   src/image_enc.c
-  src/qr_geom.c
   src/util.c
   src/dbglog.c
+  src/camera.c
+  src/receiver.c
+  src/recv_open.c
 )
 target_include_directories(cpwin_common PUBLIC src)
 target_compile_definitions(cpwin_common PUBLIC ${CP_DEFS})
 target_compile_options(cpwin_common PRIVATE ${CP_COPTS})
-target_link_libraries(cpwin_common PUBLIC cp_core cp_qrcodegen)
+target_link_libraries(cpwin_common PUBLIC cp_core cp_qrcodegen cpwin_scan)
 # stb is only visible to image_enc.c
 set_source_files_properties(src/image_enc.c PROPERTIES INCLUDE_DIRECTORIES "${CP_STB_DIR}")
 
@@ -80,6 +86,7 @@ add_executable(CodeTrans WIN32
   src/hotkey.c
   src/tray.c
   src/compat.c
+  src/recv_window.c
   res/app.rc
 )
 # The release is ONE exe: the x86 build, which runs on 32- and 64-bit Windows alike.
@@ -106,10 +113,17 @@ target_include_directories(CodeTrans PRIVATE $<$<COMPILE_LANGUAGE:RC>:${CMAKE_CU
 
 # ---- console test harness (not shipped)
 add_executable(cpwin_tests tests/test_main.c src/compat.c)
+target_compile_definitions(cpwin_tests PRIVATE CP_DENSE_FRAME=L"${CMAKE_CURRENT_SOURCE_DIR}/../android/app/src/androidTest/assets/frames/d3lt_000.png")
 target_compile_options(cpwin_tests PRIVATE ${CP_COPTS})
 target_include_directories(cpwin_tests PRIVATE ${CP_STB_DIR})
 target_link_options(cpwin_tests PRIVATE ${CP_LOPTS} -mconsole)
 target_link_libraries(cpwin_tests PRIVATE cpwin_common cp_quirc ${CP_SYSLIBS})
+
+# ---- dev tool: open a webcam through camera.c and report what it delivers
+add_executable(cpwin_camtest tests/camtest.c src/compat.c)
+target_compile_options(cpwin_camtest PRIVATE ${CP_COPTS})
+target_link_options(cpwin_camtest PRIVATE ${CP_LOPTS} -mconsole)
+target_link_libraries(cpwin_camtest PRIVATE cpwin_common ${CP_SYSLIBS})
 
 # ---- dev tool: decode screenshots of the window like the phone would
 add_executable(cpwin_qrscan tests/qrscan.c)

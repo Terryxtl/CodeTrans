@@ -33,6 +33,9 @@ struct cp_tx {
     d3_header d3h;
     uint64_t  d3_seq;
     int       d3_gzip;
+    /* optical board */
+    ob_enc   *ob;
+    int       ob_profile;    /* CP_OB_* */
 };
 
 static cp_tx *tx_new_d3(const cp_payload *p, size_t qr_capacity, const cp_tx_opts *opts)
@@ -78,6 +81,36 @@ static cp_tx *tx_new_d3(const cp_payload *p, size_t qr_capacity, const cp_tx_opt
     return tx;
 }
 
+static cp_tx *tx_new_ob(const cp_payload *p, const cp_tx_opts *opts)
+{
+    const uint8_t *bytes;
+    size_t n = 0;
+    cp_tx *tx;
+    int profile = opts ? opts->ob_profile : CP_OB_BANDS;
+
+    bytes = cp_payload_bytes(p, &n);
+    if (!bytes || n == 0 || (uint64_t)n > CP_OB_MAX_BYTES || (profile != CP_OB_BANDS && profile != CP_OB_TILES))
+        return NULL;
+    tx = (cp_tx *)calloc(1, sizeof *tx);
+    if (!tx)
+        return NULL;
+    tx->proto = CP_PROTO_OB;
+    tx->ob_profile = profile;
+    tx->ob = ob_enc_new(bytes, n, profile);
+    if (!tx->ob) {
+        free(tx);
+        return NULL;
+    }
+    {
+        uint8_t tag[8];
+        ob_enc_tag(tx->ob, tag);
+        tx->session_id = (uint32_t)tag[0] | ((uint32_t)tag[1] << 8) | ((uint32_t)tag[2] << 16) | ((uint32_t)tag[3] << 24);
+    }
+    tx->oti.F = n;
+    tx->oti.T = (uint16_t)ob_enc_width(tx->ob);
+    return tx;
+}
+
 cp_tx *cp_tx_new(int proto, const cp_payload *p, size_t qr_capacity, const cp_tx_opts *opts)
 {
     cp_tx *tx;
@@ -87,6 +120,8 @@ cp_tx *cp_tx_new(int proto, const cp_payload *p, size_t qr_capacity, const cp_tx
 
     if (proto == CP_PROTO_D3 && p)
         return tx_new_d3(p, qr_capacity, opts);
+    if (proto == CP_PROTO_OB && p)
+        return tx_new_ob(p, opts);
     if (proto != CP_PROTO_RQ || !p)
         return NULL;
     bytes = cp_payload_bytes(p, &n);
@@ -141,7 +176,7 @@ size_t cp_tx_next(cp_tx *tx, uint8_t *buf, size_t cap)
         d3_enc_block(tx->d3, tx->d3h.seq, tx->sym);
         return d3_frame_write(buf, cap, &tx->d3h, tx->sym);
     }
-    if (!tx || !buf || cap < (size_t)CP_FRAME_OVERHEAD + tx->oti.T)
+    if (!tx || tx->proto != CP_PROTO_RQ || !buf || cap < (size_t)CP_FRAME_OVERHEAD + tx->oti.T)
         return 0;
     sbn = tx->next_sbn;
     esi = tx->next_esi[sbn];
@@ -152,6 +187,19 @@ size_t cp_tx_next(cp_tx *tx, uint8_t *buf, size_t cap)
     tx->next_esi[sbn] = esi + 1;
     tx->next_sbn = (uint8_t)((sbn + 1u) % tx->oti.Z);
     return cp_frame_write(buf, cap, tx->session_id, &tx->oti, sbn, esi, tx->sym);
+}
+
+int cp_tx_next_board(cp_tx *tx, int boards, uint8_t *out)
+{
+    size_t i, n;
+    if (!tx || tx->proto != CP_PROTO_OB || !out || boards < 1 || boards > 16)
+        return 0;
+    if (!ob_enc_boards(tx->ob, boards, out))
+        return 0;
+    n = (size_t)boards * CP_OB_SIDE * CP_OB_SIDE;
+    for (i = 0; i < n; i++)          /* 1 = white internally, 1 = dark here */
+        out[i] ^= 1;
+    return 1;
 }
 
 void cp_tx_info_get(const cp_tx *tx, cp_tx_info *out)
@@ -169,6 +217,9 @@ void cp_tx_info_get(const cp_tx *tx, cp_tx_info *out)
     if (tx->proto == CP_PROTO_D3) {
         out->total_source_symbols = tx->d3h.k;
         out->d3_gzip = tx->d3_gzip;
+    } else if (tx->proto == CP_PROTO_OB) {
+        out->total_source_symbols = ob_enc_rows(tx->ob);
+        out->ob_profile = tx->ob_profile;
     } else {
         out->total_source_symbols = (uint32_t)cp_oti_Kt(&tx->oti);
     }
@@ -180,6 +231,7 @@ void cp_tx_free(cp_tx *tx)
         return;
     fec_enc_free(tx->enc);
     d3_enc_free(tx->d3);
+    ob_enc_free(tx->ob);
     free(tx->data);
     free(tx->sym);
     free(tx);

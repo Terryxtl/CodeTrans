@@ -40,18 +40,42 @@
                 android:layout_height="0dp"
                 android:layout_marginHorizontal="@dimen/gutter"
                 android:layout_marginTop="@dimen/gutter"
-                android:layout_marginBottom="@dimen/card_bottom_clearance"
                 android:layout_weight="4" />
+
+            <!-- Save and Share share one row, half width each; system-bar insets come from content's padding. -->
+            <LinearLayout
+                android:id="@+id/actions"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginHorizontal="@dimen/gutter"
+                android:layout_marginTop="@dimen/action_gap"
+                android:layout_marginBottom="@dimen/action_gap"
+                android:baselineAligned="false"
+                android:orientation="horizontal">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/save"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="@dimen/gutter"
+                    android:layout_weight="1"
+                    android:enabled="false"
+                    android:gravity="center"
+                    android:text="@string/save"
+                    app:icon="@drawable/ic_save"
+                    app:iconGravity="textStart" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/share"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:enabled="false"
+                    android:gravity="center"
+                    android:text="@string/share"
+                    app:icon="@drawable/ic_share"
+                    app:iconGravity="textStart" />
+            </LinearLayout>
         </LinearLayout>
     </LinearLayout>
-
-    <com.google.android.material.floatingactionbutton.ExtendedFloatingActionButton
-        android:id="@+id/share"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom|end"
-        android:layout_margin="@dimen/fab_margin"
-        android:enabled="false"
-        android:text="@string/share"
-        app:icon="@drawable/ic_share" />
 </androidx.coordinatorlayout.widget.CoordinatorLayout>

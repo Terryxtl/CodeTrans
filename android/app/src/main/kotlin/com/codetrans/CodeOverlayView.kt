@@ -8,14 +8,14 @@ import android.util.AttributeSet
 import android.view.View
 
 /**
- * Boxes over the camera preview for the QR codes in view (stabilised by [CodeTracker]):
+ * Boxes over the camera preview for the QR codes in view (stabilised by [QuadTracker]):
  * green = read, amber = seen but unreadable (too small / blurred / moiré).
  */
 class CodeOverlayView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
 ) : View(context, attrs) {
-    private var snap = CodeTracker.Snapshot.EMPTY
+    private var snap = CodeSnapshot.EMPTY
     private val path = Path()
     private val pt = FloatArray(2)
     private val density = resources.displayMetrics.density
@@ -31,7 +31,7 @@ class CodeOverlayView @JvmOverloads constructor(
         importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
     }
 
-    fun setCodes(s: CodeTracker.Snapshot) {
+    fun setCodes(s: CodeSnapshot) {
         if (s.count == 0 && snap.count == 0) return
         snap = s
         invalidate()

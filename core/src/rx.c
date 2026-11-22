@@ -59,6 +59,7 @@ typedef struct rx_key {
     uint16_t d3_k, d3_bl;          /* D3 stream identity (with id = sessionId) */
     uint32_t d3_total, d3_fnv;
     uint8_t  d3_flags;             /* critical half only                       */
+    uint8_t  ob_tag[8];            /* OB: session tag (id = its low 32 bits)   */
 } rx_key;
 
 typedef struct rx_session {
@@ -88,6 +89,36 @@ typedef struct d3_session {
     int       finalizing;
 } d3_session;
 
+/* Optical board session, bound by its manifest. All bookkeeping is guarded
+ * by rx->mu (feeding a unit is a copy; a group solve is a few tens of us);
+ * the final SHA-256 + container decode run without the lock. */
+typedef struct ob_group {
+    uint8_t  *rows;                 /* up to 32 received rows (lazy)            */
+    uint8_t   ids[OB_GROUP];
+    uint8_t   n, solved;
+} ob_group;
+
+typedef struct ob_session {
+    struct ob_session *next;
+    rx_key    key;
+    uint8_t   mode;                 /* OB_TYPE_TILE / OB_TYPE_BAND              */
+    uint32_t  width, length, nrows, ngroups, solved;
+    uint8_t   digest[32];
+    ob_group *groups;
+    uint8_t  *data;                 /* nrows * width recovered source rows     */
+    uint64_t  last_seen;
+    uint64_t  have, need;
+    int       kind;
+    int       refs;
+    int       dead;
+    int       finalizing;
+} ob_session;
+
+typedef struct ob_pend {
+    size_t  len;
+    uint8_t body[OB_BAND_BODY];
+} ob_pend;
+
 struct cp_rx {
     cp_mutex    mu;
     char       *out_dir;
@@ -95,6 +126,9 @@ struct cp_rx {
     int         enable_d3, enable_plain;
     rx_session *sessions;          /* active + finalizing                     */
     d3_session *d3s;               /* Decimen: active + finalizing            */
+    ob_session *obs;               /* optical board: active + finalizing      */
+    ob_pend    *ob_pend;           /* ring of units seen before a manifest    */
+    int         ob_pend_head, ob_pend_n;
     uint64_t    tick;
     uint64_t    generation;        /* bumped by cp_rx_reset                   */
     rx_key      done[RX_DONE_LRU]; /* MRU first                               */
@@ -109,6 +143,7 @@ struct cp_rx {
     uint64_t    rate_epoch[RX_RATE_BUCKETS];
     uint64_t    rate_bytes[RX_RATE_BUCKETS];
     uint64_t    rate_start_ms, rate_last_ms;
+    cp_rx_stats stats;             /* diagnostics (cp_rx_stats_get)            */
 };
 
 /* ---- small helpers ------------------------------------------------------ */
@@ -118,7 +153,7 @@ static int key_eq(const rx_key *a, const rx_key *b)
     return a->proto == b->proto && a->id == b->id && a->oti.F == b->oti.F && a->oti.T == b->oti.T &&
            a->oti.Z == b->oti.Z && a->oti.N == b->oti.N && a->oti.Al == b->oti.Al && a->d3_k == b->d3_k &&
            a->d3_bl == b->d3_bl && a->d3_total == b->d3_total && a->d3_fnv == b->d3_fnv &&
-           a->d3_flags == b->d3_flags;
+           a->d3_flags == b->d3_flags && !memcmp(a->ob_tag, b->ob_tag, sizeof a->ob_tag);
 }
 
 /* Result directory / session id of a Decimen stream: its 16-bit session id,
@@ -379,30 +414,13 @@ static char *utf8_display(const uint8_t *s, size_t n, size_t *out_len)
     if (!o)
         return NULL;
     while (i < n) {
-        uint8_t c = s[i];
-        size_t len = 0, k;
         uint32_t cp = 0;
-        if (c >= 0x01 && c < 0x80) {
-            o[j++] = (char)c;
-            i++;
+        size_t len = cp_utf8_decode(s + i, n - i, &cp);
+        if (len && cp != 0) {
+            memcpy(o + j, s + i, len);
+            j += len;
+            i += len;
             continue;
-        }
-        if ((c & 0xE0) == 0xC0) { len = 2; cp = c & 0x1Fu; }
-        else if ((c & 0xF0) == 0xE0) { len = 3; cp = c & 0x0Fu; }
-        else if ((c & 0xF8) == 0xF0) { len = 4; cp = c & 0x07u; }
-        if (len && i + len <= n) {
-            for (k = 1; k < len; k++) {
-                if ((s[i + k] & 0xC0) != 0x80)
-                    break;
-                cp = (cp << 6) | (s[i + k] & 0x3Fu);
-            }
-            if (k == len && !((len == 2 && cp < 0x80) || (len == 3 && cp < 0x800) ||
-                              (len == 4 && (cp < 0x10000 || cp > 0x10FFFF)) || (cp >= 0xD800 && cp <= 0xDFFF))) {
-                memcpy(o + j, s + i, len);
-                j += len;
-                i += len;
-                continue;
-            }
         }
         o[j++] = (char)0xEF;
         o[j++] = (char)0xBF;
@@ -420,15 +438,16 @@ static const char *image_ext(const char *mime, const uint8_t *d, size_t n)
                                           { "image/gif", "gif" },   { "image/webp", "webp" }, { "image/bmp", "bmp" },
                                           { "image/heic", "heic" }, { "image/heif", "heif" }, { "image/avif", "avif" },
                                           { "image/tiff", "tif" },  { NULL, NULL } };
+    const char *sniffed;
     int i;
     for (i = 0; map[i][0]; i++)
         if (!strcmp(mime, map[i][0]))
             return map[i][1];
-    if (n >= 4 && d[0] == 0x89 && d[1] == 'P') return "png";
-    if (n >= 3 && d[0] == 0xFF && d[1] == 0xD8) return "jpg";
-    if (n >= 4 && !memcmp(d, "GIF8", 4)) return "gif";
-    if (n >= 12 && !memcmp(d, "RIFF", 4) && !memcmp(d + 8, "WEBP", 4)) return "webp";
-    if (n >= 2 && d[0] == 'B' && d[1] == 'M') return "bmp";
+    sniffed = cp_image_mime_sniff(d, n);
+    if (sniffed)
+        for (i = 0; map[i][0]; i++)
+            if (!strcmp(sniffed, map[i][0]))
+                return map[i][1];
     return "bin";
 }
 
@@ -763,17 +782,23 @@ static void d3s_unref(d3_session *s)
         d3s_free(s);
 }
 
-/* both protocols share the RX_MAX_ACTIVE budget */
+static void obs_kill(cp_rx *rx, ob_session *s);
+
+/* all protocols share the RX_MAX_ACTIVE budget */
 static int active_count(cp_rx *rx)
 {
     int n = 0;
     rx_session *s;
     d3_session *d;
+    ob_session *o;
     for (s = rx->sessions; s; s = s->next)
         if (!s->finalizing)
             n++;
     for (d = rx->d3s; d; d = d->next)
         if (!d->finalizing)
+            n++;
+    for (o = rx->obs; o; o = o->next)
+        if (!o->finalizing)
             n++;
     return n;
 }
@@ -783,13 +808,28 @@ static int evict_lru(cp_rx *rx)
 {
     rx_session *v = NULL, *it;
     d3_session *dv = NULL, *dt;
+    ob_session *ov = NULL, *ot;
+    uint64_t best = UINT64_MAX;
     for (it = rx->sessions; it; it = it->next)
         if (!it->finalizing && (!v || it->last_seen < v->last_seen))
             v = it;
     for (dt = rx->d3s; dt; dt = dt->next)
         if (!dt->finalizing && (!dv || dt->last_seen < dv->last_seen))
             dv = dt;
-    if (dv && (!v || dv->last_seen < v->last_seen)) {
+    for (ot = rx->obs; ot; ot = ot->next)
+        if (!ot->finalizing && (!ov || ot->last_seen < ov->last_seen))
+            ov = ot;
+    if (v)
+        best = v->last_seen;
+    if (dv && dv->last_seen < best)
+        best = dv->last_seen;
+    if (ov && ov->last_seen < best)
+        best = ov->last_seen;
+    if (ov && ov->last_seen == best) {
+        obs_kill(rx, ov);
+        return 1;
+    }
+    if (dv && dv->last_seen == best) {
         d3s_kill(rx, dv);
         return 1;
     }
@@ -821,7 +861,9 @@ static int push_cp(cp_rx *rx, const uint8_t *data, size_t n)
     key.oti = f.oti;
 
     cp_mutex_lock(&rx->mu);
+    rx->stats.frames++;
     if (done_find(rx, &key) >= 0) {
+        rx->stats.duplicates++;      /* transfer already received */
         cp_mutex_unlock(&rx->mu);
         return 0;
     }
@@ -829,6 +871,7 @@ static int push_cp(cp_rx *rx, const uint8_t *data, size_t n)
         if (key_eq(&s->key, &key))
             break;
     if (s && s->finalizing) {
+        rx->stats.duplicates++;
         cp_mutex_unlock(&rx->mu);
         return 0;
     }
@@ -846,6 +889,7 @@ static int push_cp(cp_rx *rx, const uint8_t *data, size_t n)
     s->last_seen = ++rx->tick;
     b = &s->blocks[f.sbn];
     if (b->done) {
+        rx->stats.duplicates++;      /* block already decoded */
         cp_mutex_unlock(&rx->mu);
         return 0;
     }
@@ -861,8 +905,10 @@ static int push_cp(cp_rx *rx, const uint8_t *data, size_t n)
     } else {
         dup = rep_find(b, f.esi, &pos);
     }
-    if (dup)
+    if (dup) {
+        rx->stats.duplicates++;
         goto out;
+    }
     if (b->received >= b->K + RX_MAX_EXTRA) {   /* hopeless block (should not happen) */
         if (!b->busy) {
             fail_session(rx, s);
@@ -902,6 +948,7 @@ static int push_cp(cp_rx *rx, const uint8_t *data, size_t n)
     if (f.esi < b->K)
         b->have[f.esi >> 3] |= (uint8_t)(1u << (f.esi & 7));
     b->received++;
+    rx->stats.unique++;
     if (b->received <= b->K)
         s->have++;
     rate_add(rx, T);
@@ -1081,13 +1128,14 @@ static int d3_finalize(cp_rx *rx, d3_session *s)
 static int push_d3(cp_rx *rx, const uint8_t *data, size_t n)
 {
     d3_header h;
-    d3_dec_stats st;
+    d3_dec_stats st, st0;
     rx_key key;
     d3_session *s;
     uint64_t cap;
     int v, r = 0, ev = 0, claim = 0, kind = CP_KIND_NONE, fed = 0;
 
     memset(&st, 0, sizeof st);
+    memset(&st0, 0, sizeof st0);
     v = d3_classify(data, n, &h);
     cp_mutex_lock(&rx->mu);
     if (!rx->enable_d3)
@@ -1111,13 +1159,18 @@ static int push_d3(cp_rx *rx, const uint8_t *data, size_t n)
     key.d3_total = h.total_len;
     key.d3_fnv = h.fnv;
     key.d3_flags = (uint8_t)(h.flags & D3_FLAGS_MUST);   /* ignorable bits never split a stream */
-    if (done_find(rx, &key) >= 0)
+    rx->stats.frames++;
+    if (done_find(rx, &key) >= 0) {
+        rx->stats.duplicates++;
         goto unlock;
+    }
     for (s = rx->d3s; s; s = s->next)
         if (key_eq(&s->key, &key))
             break;
-    if (s && s->finalizing)
+    if (s && s->finalizing) {
+        rx->stats.duplicates++;
         goto unlock;
+    }
     if (!s) {
         while (active_count(rx) >= RX_MAX_ACTIVE && evict_lru(rx))
             ;
@@ -1142,6 +1195,7 @@ static int push_d3(cp_rx *rx, const uint8_t *data, size_t n)
 
     cp_mutex_lock(&s->mu);
     if (!s->claimed && s->dec) {
+        d3_dec_stats_get(s->dec, &st0);
         r = d3_dec_add(s->dec, h.seq, data + D3_HDR_LEN);
         d3_dec_stats_get(s->dec, &st);
         fed = 1;
@@ -1158,6 +1212,22 @@ static int push_d3(cp_rx *rx, const uint8_t *data, size_t n)
     cp_mutex_unlock(&s->mu);
 
     cp_mutex_lock(&rx->mu);
+    if (fed) {
+        if (r == 1)
+            rx->stats.unique++;
+        else if (r == 0 && st.frames_new > st0.frames_new)
+            rx->stats.redundant++;
+        else if (r == 0)
+            rx->stats.duplicates++;
+        if (h.flags & D3_FLAG_CAUCHY96) {
+            rx->stats.rs96_k = st.k;
+            rx->stats.rs96_rows = st.frames_new;
+            rx->stats.rs96_useful = st.useful;
+            rx->stats.rs96_solved = st.solved;
+        }
+    } else {
+        rx->stats.duplicates++;      /* stream complete, being assembled */
+    }
     if (fed) {
         if (claim)
             s->have = st.k;
@@ -1182,6 +1252,337 @@ static int push_d3(cp_rx *rx, const uint8_t *data, size_t n)
     d3s_unref(s);
 unlock:
     cp_mutex_unlock(&rx->mu);
+    return ev;
+}
+
+/* ---- optical board ----------------------------------------------------------- */
+
+static uint32_t ob_tag_id(const uint8_t *tag)
+{
+    return (uint32_t)tag[0] | ((uint32_t)tag[1] << 8) | ((uint32_t)tag[2] << 16) | ((uint32_t)tag[3] << 24);
+}
+
+static void obs_free(ob_session *s)
+{
+    uint32_t g;
+    if (s->groups)
+        for (g = 0; g < s->ngroups; g++)
+            free(s->groups[g].rows);
+    free(s->groups);
+    free(s->data);
+    free(s);
+}
+
+static void obs_unlink(cp_rx *rx, ob_session *s)
+{
+    ob_session **pp = &rx->obs;
+    while (*pp) {
+        if (*pp == s) {
+            *pp = s->next;
+            s->next = NULL;
+            return;
+        }
+        pp = &(*pp)->next;
+    }
+}
+
+/* lock held */
+static void obs_kill(cp_rx *rx, ob_session *s)
+{
+    obs_unlink(rx, s);
+    s->dead = 1;
+    if (s->refs == 0)
+        obs_free(s);
+}
+
+static void obs_unref(ob_session *s)
+{
+    s->refs--;
+    if (s->dead && s->refs == 0)
+        obs_free(s);
+}
+
+static void ob_key(rx_key *k, const uint8_t *tag)
+{
+    memset(k, 0, sizeof *k);
+    k->proto = CP_PROTO_OB;
+    k->id = ob_tag_id(tag);
+    memcpy(k->ob_tag, tag, 8);
+}
+
+/* Diagnostics: s is the optical board stream most recently fed (lock held). */
+static void ob_note_stats(cp_rx *rx, const ob_session *s)
+{
+    rx->stats.ob_mode = (uint32_t)(s->mode == OB_TYPE_TILE ? CP_OB_TILES : CP_OB_BANDS) + 1u;
+    rx->stats.ob_k = s->nrows;
+    rx->stats.ob_rows = (uint32_t)s->have;
+    rx->stats.ob_groups = s->ngroups;
+    rx->stats.ob_solved = s->solved;
+}
+
+/* Enter with the lock held; returns with it held. s is gone afterwards. */
+static int ob_finalize(cp_rx *rx, ob_session *s)
+{
+    uint64_t gen = rx->generation;
+    cp_result *res = NULL;
+    uint8_t digest[32];
+    int ev;
+
+    s->finalizing = 1;
+    s->refs++;
+    done_add(rx, &s->key);
+    cp_mutex_unlock(&rx->mu);
+
+    cp_sha256(s->data, s->length, digest);
+    if (!memcmp(digest, s->digest, 32))
+        res = build_result(rx->out_dir, s->key.id, s->data, s->length, rx->max_bytes);
+
+    cp_mutex_lock(&rx->mu);
+    if (res) {
+        if (gen == rx->generation) {
+            cp_result_free(rx->result);
+            rx->result = res;
+            ev = CP_EV_COMPLETE;
+        } else {
+            cp_result_free(res);     /* reset happened meanwhile */
+            ev = 0;
+        }
+    } else {
+        done_remove(rx, &s->key);    /* checksum / container failure: collect again */
+        ev = CP_EV_FAILED;
+    }
+    obs_unlink(rx, s);
+    s->dead = 1;
+    obs_unref(s);
+    return ev;
+}
+
+/* One data unit for a bound session (lock held). *gone = 1 when s was
+ * finalized or dropped and must not be touched again. */
+static int ob_feed_locked(cp_rx *rx, ob_session *s, const uint8_t *body, size_t n, int *gone)
+{
+    uint32_t g = (uint32_t)body[8] | ((uint32_t)body[9] << 8);
+    int r = body[10], k, i;
+    const uint8_t *payload = body + OB_HDR_LEN;
+    ob_group *grp;
+
+    *gone = 0;
+    if ((body[11] & 0xF0u) != s->mode || n != OB_HDR_LEN + s->width || g >= s->ngroups)
+        return 0;
+    grp = &s->groups[g];
+    if (grp->solved) {
+        rx->stats.duplicates++;
+        return 0;
+    }
+    k = (int)(s->nrows - g * OB_GROUP < OB_GROUP ? s->nrows - g * OB_GROUP : OB_GROUP);
+    if (r >= k && r < OB_GROUP)
+        return 0;
+    for (i = 0; i < grp->n; i++)
+        if (grp->ids[i] == r) {
+            if (memcmp(grp->rows + (size_t)i * s->width, payload, s->width) != 0) {
+                obs_kill(rx, s);    /* two different rows with one id: not trustworthy */
+                *gone = 1;
+                return CP_EV_FAILED;
+            }
+            rx->stats.duplicates++;
+            return 0;
+        }
+    if (!grp->rows) {
+        grp->rows = (uint8_t *)malloc((size_t)OB_GROUP * s->width);
+        if (!grp->rows)
+            return 0;
+    }
+    memcpy(grp->rows + (size_t)grp->n * s->width, payload, s->width);
+    grp->ids[grp->n++] = (uint8_t)r;
+    s->have++;
+    rx->stats.unique++;
+    s->last_seen = ++rx->tick;
+    rate_add(rx, s->width);
+    ob_note_stats(rx, s);
+    if (g == 0 && r == 0 && s->kind == CP_KIND_NONE && s->width >= 5 && !memcmp(payload, "CPO1", 4) &&
+        payload[4] >= CP_KIND_TEXT && payload[4] <= CP_KIND_FILES)
+        s->kind = payload[4];
+    if (grp->n < k)
+        return CP_EV_PROGRESS;
+    if (!ob_outer_recover(grp->ids, grp->rows, k, (int)s->width, s->data + (size_t)g * OB_GROUP * s->width)) {
+        obs_kill(rx, s);
+        *gone = 1;
+        return CP_EV_FAILED;
+    }
+    grp->solved = 1;
+    free(grp->rows);
+    grp->rows = NULL;
+    s->solved++;
+    ob_note_stats(rx, s);
+    if (g == 0 && s->kind == CP_KIND_NONE && !memcmp(s->data, "CPO1", 4) && s->data[4] >= CP_KIND_TEXT &&
+        s->data[4] <= CP_KIND_FILES)
+        s->kind = s->data[4];
+    if (s->solved < s->ngroups)
+        return CP_EV_PROGRESS;
+    *gone = 1;
+    return CP_EV_PROGRESS | ob_finalize(rx, s);
+}
+
+static ob_session *ob_find(cp_rx *rx, const uint8_t *tag)
+{
+    ob_session *s;
+    for (s = rx->obs; s; s = s->next)
+        if (!memcmp(s->key.ob_tag, tag, 8))
+            return s;
+    return NULL;
+}
+
+static void ob_pend_push(cp_rx *rx, const uint8_t *body, size_t n)
+{
+    ob_pend *p;
+    if (!rx->ob_pend) {
+        rx->ob_pend = (ob_pend *)malloc(sizeof(ob_pend) * OB_PENDING_MAX);
+        if (!rx->ob_pend)
+            return;
+    }
+    if (rx->ob_pend_n == OB_PENDING_MAX) {   /* drop the oldest */
+        rx->ob_pend_head = (rx->ob_pend_head + 1) % OB_PENDING_MAX;
+        rx->ob_pend_n--;
+    }
+    p = &rx->ob_pend[(rx->ob_pend_head + rx->ob_pend_n) % OB_PENDING_MAX];
+    p->len = n;
+    memcpy(p->body, body, n);
+    rx->ob_pend_n++;
+}
+
+/* Moves the pending units of tag out of the ring (lock held). Caller frees. */
+static ob_pend *ob_pend_take(cp_rx *rx, const uint8_t *tag, int *count)
+{
+    ob_pend *out = NULL;
+    int i, kept = 0, m = 0;
+    *count = 0;
+    if (!rx->ob_pend_n)
+        return NULL;
+    out = (ob_pend *)malloc(sizeof(ob_pend) * (size_t)rx->ob_pend_n);
+    if (!out)
+        return NULL;
+    for (i = 0; i < rx->ob_pend_n; i++) {
+        ob_pend *p = &rx->ob_pend[(rx->ob_pend_head + i) % OB_PENDING_MAX];
+        if (!memcmp(p->body, tag, 8))
+            out[m++] = *p;
+        else
+            rx->ob_pend[(rx->ob_pend_head + kept++) % OB_PENDING_MAX] = *p;
+    }
+    rx->ob_pend_n = kept;
+    *count = m;
+    return out;
+}
+
+int ob_rx_feed(cp_rx *rx, const uint8_t *body, size_t n)
+{
+    uint32_t g, width, length;
+    uint8_t fmt, base, digest[32];
+    rx_key key;
+    ob_session *s;
+    int ev = 0, gone, i, npend;
+    ob_pend *pend;
+    uint64_t cap;
+
+    if (!rx || !body || (n != OB_TILE_BODY && n != OB_BAND_BODY))
+        return 0;
+    g = (uint32_t)body[8] | ((uint32_t)body[9] << 8);
+    fmt = body[11];
+    base = (uint8_t)(fmt & 0xF0u);
+    width = base == OB_TYPE_TILE ? OB_TILE_DATA : base == OB_TYPE_BAND ? OB_BAND_DATA : 0;
+    if (!width || n != OB_HDR_LEN + width)
+        return 0;
+
+    if ((fmt & 0x0Fu) == 1 && g == OB_MANIFEST_GROUP && body[10] == 0) {
+        const uint8_t *m = body + OB_HDR_LEN;
+        length = (uint32_t)m[4] | ((uint32_t)m[5] << 8) | ((uint32_t)m[6] << 16) | ((uint32_t)m[7] << 24);
+        if (memcmp(m, "CTB1", 4) != 0 || length < 1)
+            return 0;
+        for (i = 40; i < (int)width; i++)
+            if (m[i])
+                return 0;
+        cp_sha256(m, width, digest);
+        if (memcmp(digest, body, 8) != 0)      /* the tag names this exact manifest */
+            return 0;
+        cap = rx->max_bytes < CP_OB_MAX_BYTES ? rx->max_bytes : CP_OB_MAX_BYTES;
+        if (length > cap)
+            return CP_EV_UNSUPPORTED;
+        ob_key(&key, body);
+        cp_mutex_lock(&rx->mu);
+        if (done_find(rx, &key) >= 0 || ob_find(rx, body)) {
+            cp_mutex_unlock(&rx->mu);
+            return 0;
+        }
+        while (active_count(rx) >= RX_MAX_ACTIVE && evict_lru(rx))
+            ;
+        s = (ob_session *)calloc(1, sizeof *s);
+        if (!s) {
+            cp_mutex_unlock(&rx->mu);
+            return 0;
+        }
+        s->key = key;
+        s->mode = base;
+        s->width = width;
+        s->length = length;
+        s->nrows = (length + width - 1) / width;
+        s->ngroups = (s->nrows + OB_GROUP - 1) / OB_GROUP;
+        memcpy(s->digest, m + 8, 32);
+        s->need = s->nrows;
+        s->groups = (ob_group *)calloc(s->ngroups, sizeof *s->groups);
+        s->data = (uint8_t *)calloc(s->nrows, width);
+        if (!s->groups || !s->data) {
+            obs_free(s);
+            cp_mutex_unlock(&rx->mu);
+            return 0;
+        }
+        s->last_seen = ++rx->tick;
+        s->next = rx->obs;
+        rx->obs = s;
+        ob_note_stats(rx, s);
+        /* replay what arrived before the manifest */
+        pend = ob_pend_take(rx, body, &npend);
+        for (i = 0, gone = 0; i < npend && !gone; i++)
+            ev |= ob_feed_locked(rx, s, pend[i].body, pend[i].len, &gone);
+        free(pend);
+        cp_mutex_unlock(&rx->mu);
+        return ev;
+    }
+    if (fmt != base || g == OB_MANIFEST_GROUP)
+        return 0;
+    cp_mutex_lock(&rx->mu);
+    rx->stats.frames++;
+    s = ob_find(rx, body);
+    if (!s) {
+        ob_key(&key, body);
+        if (done_find(rx, &key) < 0)
+            ob_pend_push(rx, body, n);
+        else
+            rx->stats.duplicates++;
+    } else if (!s->finalizing) {
+        ev = ob_feed_locked(rx, s, body, n, &gone);
+    } else {
+        rx->stats.duplicates++;
+    }
+    cp_mutex_unlock(&rx->mu);
+    return ev;
+}
+
+int cp_rx_push_board(cp_rx *rx, const float *luma, int *units)
+{
+    ob_unit *u;
+    int n, i, ev = 0;
+    if (units)
+        *units = 0;
+    if (!rx || !luma)
+        return 0;
+    u = (ob_unit *)malloc(sizeof(ob_unit) * OB_SLOTS);
+    if (!u)
+        return 0;
+    n = ob_read_board(luma, u);     /* optical work: no lock held */
+    for (i = 0; i < n; i++)
+        ev |= ob_rx_feed(rx, u[i].body, u[i].len);
+    free(u);
+    if (units)
+        *units = n;
     return ev;
 }
 
@@ -1259,6 +1660,9 @@ static void clear_locked(cp_rx *rx)
         session_kill(rx, rx->sessions);
     while (rx->d3s)
         d3s_kill(rx, rx->d3s);
+    while (rx->obs)
+        obs_kill(rx, rx->obs);
+    rx->ob_pend_n = rx->ob_pend_head = 0;
     rx->n_done = 0;
     cp_result_free(rx->result);
     rx->result = NULL;
@@ -1281,6 +1685,7 @@ void cp_rx_free(cp_rx *rx)
     clear_locked(rx);
     cp_mutex_unlock(&rx->mu);
     cp_mutex_destroy(&rx->mu);
+    free(rx->ob_pend);
     free(rx->out_dir);
     free(rx);
 }
@@ -1330,6 +1735,7 @@ void cp_rx_progress(cp_rx *rx, cp_progress *out)
 {
     rx_session *s, *best = NULL;
     d3_session *d, *dbest = NULL;
+    ob_session *o, *obest = NULL;
     if (!out)
         return;
     memset(out, 0, sizeof *out);
@@ -1342,7 +1748,17 @@ void cp_rx_progress(cp_rx *rx, cp_progress *out)
     for (d = rx->d3s; d; d = d->next)
         if (!dbest || d->last_seen > dbest->last_seen)
             dbest = d;
-    if (dbest && (!best || dbest->last_seen > best->last_seen)) {
+    for (o = rx->obs; o; o = o->next)
+        if (!obest || o->last_seen > obest->last_seen)
+            obest = o;
+    if (obest && (!best || obest->last_seen > best->last_seen) && (!dbest || obest->last_seen > dbest->last_seen)) {
+        out->proto = CP_PROTO_OB;
+        out->kind = obest->kind;
+        out->have = obest->have;
+        out->need = obest->need;
+        out->total_bytes = obest->length;
+        out->session_id = obest->key.id;
+    } else if (dbest && (!best || dbest->last_seen > best->last_seen)) {
         out->proto = CP_PROTO_D3;
         out->kind = dbest->kind;
         out->have = dbest->have;
@@ -1359,6 +1775,18 @@ void cp_rx_progress(cp_rx *rx, cp_progress *out)
     }
     out->bytes_per_sec = rate_get(rx);
     out->codes_in_frame = rx->codes_in_frame;
+    cp_mutex_unlock(&rx->mu);
+}
+
+void cp_rx_stats_get(cp_rx *rx, cp_rx_stats *out)
+{
+    if (!out)
+        return;
+    memset(out, 0, sizeof *out);
+    if (!rx)
+        return;
+    cp_mutex_lock(&rx->mu);
+    *out = rx->stats;
     cp_mutex_unlock(&rx->mu);
 }
 

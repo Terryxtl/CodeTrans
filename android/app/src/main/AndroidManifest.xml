@@ -34,6 +34,28 @@
             </intent-filter>
         </activity>
 
+        <!-- Phone -> PC: shows the content as QR codes for the PC's camera receiver. Rotation
+             only re-lays the codes out (configChanges), so a running stream is not restarted. -->
+        <activity
+            android:name=".SendActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+            android:exported="true"
+            android:label="@string/send_share_label"
+            android:launchMode="singleTop"
+            android:parentActivityName=".MainActivity"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+
         <activity
             android:name=".SettingsActivity"
             android:exported="false"

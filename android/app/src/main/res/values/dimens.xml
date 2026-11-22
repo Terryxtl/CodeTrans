@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <dimen name="gutter">12dp</dimen>
-    <dimen name="fab_margin">16dp</dimen>
-    <!-- Space kept free below the preview card for the share FAB. -->
-    <dimen name="card_bottom_clearance">80dp</dimen>
+    <!-- Space above / below the Save / Share row. -->
+    <dimen name="action_gap">4dp</dimen>
 </resources>

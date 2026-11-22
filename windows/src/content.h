@@ -38,7 +38,7 @@ int      content_same(const content *a, const content *b);
 int      content_kind(const content *c);                              /* CP_KIND_* */
 
 typedef struct build_opts {
-    int      image_format;  /* CFG_IMG_PNG / CFG_IMG_JPEG */
+    int      image_format;  /* CFG_IMG_PNG / CFG_IMG_JPEG / CFG_IMG_AUTO */
     int      jpeg_quality;
     uint64_t max_bytes;     /* hard cap for the body      */
 } build_opts;

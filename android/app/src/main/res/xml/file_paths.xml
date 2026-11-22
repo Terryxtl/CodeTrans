@@ -1,7 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Only received results under <cacheDir>/rx/ are shareable. -->
+<!-- Only received results under <cacheDir>/rx/ are shareable; <cacheDir>/tx/ holds the photo the
+     system camera writes for the send screen (deleted once read). -->
 <paths>
     <cache-path
         name="rx"
         path="rx/" />
+    <cache-path
+        name="tx"
+        path="tx/" />
 </paths>

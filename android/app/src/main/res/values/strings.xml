@@ -6,6 +6,8 @@
     <!-- Main screen -->
     <string name="share">分享</string>
     <string name="share_title">分享到</string>
+    <string name="save">保存</string>
+    <string name="reset_preview">重置预览</string>
     <string name="preview_title">预览</string>
     <string name="hint_idle">将相机对准电脑上的二维码</string>
     <string name="camera_preview_desc">相机取景</string>
@@ -21,6 +23,7 @@
     <string name="kind_files">%1$d 个文件</string>
     <string name="kind_files_short">文件</string>
     <string name="proto_plain">二维码</string>
+    <string name="proto_ob">光传码面</string>
     <string name="codes_format">%d 码</string>
 
     <!-- Permission -->
@@ -37,6 +40,11 @@
     <string name="msg_saved">已保存 %1$d 个文件到 下载/CodeTrans</string>
     <string name="msg_save_failed">保存到 下载/CodeTrans 失败</string>
     <string name="msg_share_failed">没有可分享的内容</string>
+    <string name="msg_save_done">已保存</string>
+    <string name="msg_save_done_many">已保存 %1$d 个文件</string>
+    <string name="msg_save_partial">只保存了 %1$d 个文件,其余保存失败</string>
+    <string name="msg_save_error">保存失败</string>
+    <string name="msg_save_nothing">没有可保存的内容</string>
     <string name="msg_thermal">设备过热,已降至 720p、单线程解码</string>
     <string name="error_native">解码组件加载失败,此设备可能不受支持</string>
     <string name="error_camera">无法打开相机</string>
@@ -82,4 +90,39 @@
     <string name="threads_auto_summary">自动(%1$d)</string>
     <string name="licenses_body">Decimen Optical Transfer v0.5.3 / 0.5.3-fixed(Decimen v3 协议、LT 与 Cauchy RS-96 算法,移植为 C)— GNU AGPL-3.0-or-later\nnanorq — MIT License\nquirc — ISC License\nZXing-C++ — Apache License 2.0\nminiz — MIT License\nMaterial Components for Android — Apache License 2.0\nAndroidX(AppCompat、CameraX、Preference 等)— Apache License 2.0\nKotlin、kotlinx.coroutines — Apache License 2.0</string>
     <string name="ok">确定</string>
+
+    <!-- Send (phone -> PC) -->
+    <string name="send_title">发送到电脑</string>
+    <string name="send_share_label">用 CodeTrans 发到电脑</string>
+    <string name="send_text_hint">要发送的文本</string>
+    <string name="send_take_photo">拍照</string>
+    <string name="send_pick_image">选择图片</string>
+    <string name="send_pick_files">选择文件</string>
+    <string name="send_paste">粘贴</string>
+    <string name="send_clear">移除</string>
+    <string name="send_protocol">发送协议</string>
+    <string name="send_rs96">Decimen v3 · RS96</string>
+    <string name="send_bands">光传码面 · 横带（实验）</string>
+    <string name="send_tiles">光传码面 · 分块（实验）</string>
+    <string name="send_codes">同屏码数</string>
+    <string name="send_count_1">1 个</string>
+    <string name="send_count_2">2 个</string>
+    <string name="send_density">码密度(电脑摄像头较差时选低)</string>
+    <string name="send_density_low">低 V15</string>
+    <string name="send_density_mid">中 V27</string>
+    <string name="send_density_high">高 V40</string>
+    <string name="send_fps">每秒帧数</string>
+    <string name="send_fps_value">%1$d fps</string>
+    <string name="send_tip">在电脑端托盘菜单选择「摄像头接收」,把手机屏幕对准摄像头。播放时屏幕亮度调到最高;横屏可放两个更大的码。</string>
+    <string name="send_start">开始发送</string>
+    <string name="send_preparing">正在准备…</string>
+    <string name="send_stop">停止</string>
+    <string name="send_nothing">请输入文本,或选择图片 / 文件</string>
+    <string name="send_failed">无法生成传输画面（内容为空或超出当前模式的容量）</string>
+    <string name="send_read_failed">无法读取所选内容</string>
+    <string name="send_too_large">内容超过 %1$s,不适合用摄像头传输</string>
+    <string name="send_clipboard_empty">剪贴板里没有文本</string>
+
+    <!-- Developer panel (debug builds) -->
+    <string name="diag_title">诊断面板</string>
 </resources>

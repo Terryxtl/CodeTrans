@@ -1,6 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <menu xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
+    <!-- Debug builds only (hidden in MainActivity otherwise): expands / collapses the developer panel
+         over the camera view; MainActivity swaps the icon to show which state it is in. -->
+    <item
+        android:id="@+id/action_diagnostics"
+        android:icon="@drawable/ic_diagnostics"
+        android:title="@string/diag_title"
+        android:visible="false"
+        app:showAsAction="always" />
+    <item
+        android:id="@+id/action_send"
+        android:icon="@drawable/ic_qr"
+        android:title="@string/send_title"
+        app:showAsAction="always" />
     <item
         android:id="@+id/action_settings"
         android:icon="@drawable/ic_settings"

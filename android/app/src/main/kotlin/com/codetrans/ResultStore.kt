@@ -45,7 +45,7 @@ class ResultStore(private val context: Context) {
         }
         if (kind != ResultKind.TEXT && raw.isEmpty()) return null
 
-        val names = FileNames.dedupe(raw.map { (f, i) -> FileNames.sanitize(n.names.getOrNull(i) ?: f.name) })
+        val names = NativeCore.safeNames(raw.map { (f, i) -> n.names.getOrNull(i) ?: f.name })
         val files = raw.mapIndexed { idx, (f, i) ->
             val size = n.sizes.getOrNull(i)?.takeIf { it >= 0 } ?: f.length()
             val mime = when {
@@ -102,6 +102,19 @@ class ResultStore(private val context: Context) {
         )
         replace(result)
         return result
+    }
+
+    /**
+     * Drops the current result and deletes its files, but only if it still is [id]: a newer
+     * result that arrived meanwhile stays.
+     */
+    @WorkerThread
+    @Synchronized
+    fun clear(id: Long) {
+        val old = current?.takeIf { it.id == id } ?: return
+        current = null
+        val dir = old.dir ?: return
+        if (!dir.deleteRecursively()) Log.w(TAG, "could not delete result")
     }
 
     private fun replace(new: ReceivedResult) {

@@ -28,4 +28,16 @@ uint8_t *image_encode_jpeg(const uint8_t *bgra, int w, int h, BOOL alpha, int qu
 /* BGRA -> packed CF_DIB (BITMAPINFOHEADER, 32 bpp BI_RGB, bottom-up). */
 uint8_t *image_make_dib(const uint8_t *bgra, int w, int h, size_t *out_len);
 
+/* ---- adaptive image format (CFG_IMG_AUTO) ------------------------------- */
+
+/* Distinct colours among up to 4096 pixels sampled on a regular grid
+ * (saturates at IMG_AUTO_PHOTO_COLORS * 2). Screenshots, diagrams and text sit
+ * far below IMG_AUTO_PHOTO_COLORS; photos and gradients above it. */
+#define IMG_AUTO_PHOTO_COLORS 512
+int  image_sample_colors(const uint8_t *bgra, int w, int h);
+/* TRUE: send the JPEG. Only for photo-like, opaque pictures, and only when the
+ * JPEG is at most half the PNG: the lossy format must buy a clearly shorter
+ * transfer, and text or line art always stays lossless. */
+BOOL image_auto_prefers_jpeg(size_t png_len, size_t jpeg_len, int colors, BOOL alpha);
+
 #endif

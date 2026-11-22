@@ -9,7 +9,7 @@
 #include "hotkey.h"
 #include "pacer.h"
 #include "producer.h"
-#include "qr_geom.h"
+#include "recv_window.h"
 #include "snip.h"
 #include "tray.h"
 #include "util.h"
@@ -46,8 +46,8 @@ static job_params params_from_cfg(void)
     job_params p;
     const app_settings *s = &g_app.cfg;
     p.proto = s->protocol;
-    p.version = s->version;
-    p.ecc = s->ecc;
+    p.version = cfg_layout_version(s);
+    p.ecc = cfg_layout_ecc(s);
     p.image_format = s->image_format;
     p.jpeg_quality = s->jpeg_quality;
     p.count = s->code_count;
@@ -111,7 +111,7 @@ static void build_status(wchar_t *out, size_t cap)
     const app_settings *s = &g_app.cfg;
 
     if (A.pending) {
-        size_t T = qr_byte_capacity(s->version, s->ecc) - CP_FRAME_OVERHEAD;
+        size_t T = cfg_code_bytes(s) - (CFG_PROTO_IS_OB(s->protocol) ? 0 : CP_FRAME_OVERHEAD);
         double k = (double)A.pending->raw_size / (double)(T ? T : 1);
         fmt_size(A.pending->raw_size, a, CPW_COUNTOF(a));
         fmt_eta(k / (s->code_count * (pacer_effective_fps_x10() / 10.0)), eta, CPW_COUNTOF(eta));
@@ -127,19 +127,17 @@ static void build_status(wchar_t *out, size_t cap)
                 snip = L"托盘菜单截图";
             }
         }
-        wfmt(out, cap, L"等待剪切板… · %ls · 拖入文件", snip);
+        wfmt(out, cap, L"等待剪切板… · %ls · 拖入文件 · F3 摄像头接收", snip);
     } else if (j->state == JOB_PREPARING) {
         fmt_size(j->estimate, a, CPW_COUNTOF(a));
         wfmt(out, cap, L"正在准备%ls %ls…", kind_name(j->kind), a);
     } else if (j->state == JOB_ERROR) {
         wfmt(out, cap, L"⚠ %ls", j->err);
     } else {
-        double need = (double)j->tinfo.total_source_symbols + 2.0 * j->tinfo.Z;
-        double rate = s->code_count * (pacer_effective_fps_x10() / 10.0);
         wchar_t what[160];
         fmt_size(j->pinfo.raw_len, a, CPW_COUNTOF(a));
         fmt_size(j->pinfo.container_len, b, CPW_COUNTOF(b));
-        fmt_eta(need / (rate > 0 ? rate : 1), eta, CPW_COUNTOF(eta));
+        fmt_eta(cp_tx_eta_seconds(&j->tinfo, s->code_count, pacer_effective_fps_x10() / 10.0), eta, CPW_COUNTOF(eta));
         fmt_fps(fps, CPW_COUNTOF(fps));
         switch (j->kind) {
         case CP_KIND_TEXT:
@@ -177,6 +175,79 @@ static void build_status(wchar_t *out, size_t cap)
 
 /* ---- fonts / layout ---------------------------------------------------- */
 
+/* Coverage of the camera glyph at (x, y) in a unit square: body with a
+ * viewfinder hump, a lens ring and a small flash window. */
+static int cam_inside(double x, double y)
+{
+    double dx, dy, d2, rx, ry;
+    int body = 0;
+    /* body: rounded rect [0.06, 0.94] x [0.30, 0.86], corner radius 0.11 */
+    if (x >= 0.06 && x <= 0.94 && y >= 0.30 && y <= 0.86) {
+        rx = x < 0.17 ? 0.17 - x : x > 0.83 ? x - 0.83 : 0;
+        ry = y < 0.41 ? 0.41 - y : y > 0.75 ? y - 0.75 : 0;
+        body = rx * rx + ry * ry <= 0.11 * 0.11;
+    }
+    /* hump: [0.33, 0.67] x [0.17, 0.31], slanted sides */
+    if (!body && y >= 0.17 && y <= 0.31) {
+        double inset = (0.31 - y) * 0.5;
+        body = x >= 0.33 + inset && x <= 0.67 - inset;
+    }
+    if (!body)
+        return 0;
+    dx = x - 0.5;
+    dy = y - 0.58;
+    d2 = dx * dx + dy * dy;
+    if (d2 <= 0.215 * 0.215 && d2 >= 0.125 * 0.125)
+        return 0;                                    /* lens ring (cut out) */
+    dx = x - 0.80;
+    dy = y - 0.42;
+    return dx * dx + dy * dy > 0.045 * 0.045;        /* flash window (cut out) */
+}
+
+/* Camera icon, `size` px, in `color`, 4x4 supersampled alpha. */
+static HICON make_cam_icon(int size, COLORREF color)
+{
+    BITMAPINFO bi;
+    void *bits = NULL;
+    HBITMAP rgb, mask;
+    ICONINFO ii;
+    HICON icon = NULL;
+    HDC dc = GetDC(NULL);
+    if (size < 8)
+        size = 8;
+    memset(&bi, 0, sizeof bi);
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+    bi.bmiHeader.biWidth = size;
+    bi.bmiHeader.biHeight = -size;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    rgb = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    ReleaseDC(NULL, dc);
+    mask = CreateBitmap(size, size, 1, 1, NULL);
+    if (rgb && bits && mask) {
+        uint32_t *px = (uint32_t *)bits;
+        for (int y = 0; y < size; y++)
+            for (int x = 0; x < size; x++) {
+                int cov = 0;
+                for (int s = 0; s < 16; s++)
+                    cov += cam_inside((x + (s % 4 + 0.5) / 4) / size, (y + (s / 4 + 0.5) / 4) / size);
+                px[y * size + x] = ((uint32_t)(cov * 255 / 16) << 24) | ((uint32_t)GetRValue(color) << 16) |
+                                   ((uint32_t)GetGValue(color) << 8) | GetBValue(color);
+            }
+        ii.fIcon = TRUE;
+        ii.xHotspot = ii.yHotspot = 0;
+        ii.hbmMask = mask;
+        ii.hbmColor = rgb;
+        icon = CreateIconIndirect(&ii);
+    }
+    if (rgb)
+        DeleteObject(rgb);
+    if (mask)
+        DeleteObject(mask);
+    return icon;
+}
+
 static void make_fonts(void)
 {
     LOGFONTW lf;
@@ -200,6 +271,29 @@ static void make_fonts(void)
         ReleaseDC(g_app.hwnd, dc);
         A.status_h = tm.tmHeight + dpi_scale(12, g_app.dpi);
     }
+    {
+        /* same size as the ⚙ glyph; redrawn whenever the DPI changes */
+        HICON old = g_app.cam_icon;
+        int gs = A.status_h - dpi_scale(6, g_app.dpi);
+        g_app.cam_icon = make_cam_icon(gs - dpi_scale(8, g_app.dpi), GetSysColor(COLOR_BTNTEXT));
+        if (g_app.cam)
+            SendMessageW(g_app.cam, BM_SETIMAGE, IMAGE_ICON, (LPARAM)g_app.cam_icon);
+        if (old)
+            DestroyIcon(old);
+    }
+}
+
+/* Hover hints for the two status-bar buttons. */
+static void add_tooltip(HWND tip, HWND ctl, const wchar_t *text)
+{
+    TOOLINFOW ti;
+    memset(&ti, 0, sizeof ti);
+    ti.cbSize = sizeof ti;
+    ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    ti.hwnd = g_app.hwnd;
+    ti.uId = (UINT_PTR)ctl;
+    ti.lpszText = (wchar_t *)text;
+    SendMessageW(tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
 }
 
 static SIZE s_bar_size;
@@ -217,6 +311,7 @@ static void layout_children(void)
     MoveWindow(g_app.view, 0, 0, cw, view_h, TRUE);
     gs = A.status_h - dpi_scale(6, g_app.dpi);
     MoveWindow(g_app.gear, dpi_scale(4, g_app.dpi), view_h + (A.status_h - gs) / 2, gs, gs, TRUE);
+    MoveWindow(g_app.cam, cw - dpi_scale(4, g_app.dpi) - gs, view_h + (A.status_h - gs) / 2, gs, gs, TRUE);
     SetRect(&A.status_rc, 0, view_h, cw, view_h + A.status_h);
     if (g_app.cfg.settings_expanded) {
         MoveWindow(g_app.bar, 0, view_h + A.status_h, cw, bar_h, TRUE);
@@ -231,13 +326,13 @@ static void layout_children(void)
 static void app_layout(const RECT *suggested)
 {
     const app_settings *s = &g_app.cfg;
-    frame_geom g;
+    cp_frame_geom g;
     RECT r, wr;
     MONITORINFO mi;
     int cw, ch, ww, wh, x, y, minw;
     BOOL clamped = FALSE;
 
-    frame_geom_calc(&g, s->version, s->code_count, s->quiet_zone);
+    cp_frame_geom_calc(&g, cfg_layout_version(s), s->code_count, s->quiet_zone, 0, 4);
     s_bar_size = settings_bar_layout();
     minw = dpi_scale(380, g_app.dpi);
     cw = CPW_MAX(g.w * s->module_px, minw);
@@ -465,9 +560,10 @@ static void apply_hotkey(BOOL announce)
 void app_settings_changed(const app_settings *old)
 {
     const app_settings *s = &g_app.cfg;
-    BOOL session = s->protocol != old->protocol || s->version != old->version || s->ecc != old->ecc ||
+    int ver = cfg_layout_version(s), old_ver = cfg_layout_version(old);
+    BOOL session = s->protocol != old->protocol || ver != old_ver || cfg_layout_ecc(s) != cfg_layout_ecc(old) ||
                    s->image_format != old->image_format || s->jpeg_quality != old->jpeg_quality;
-    BOOL relayout = s->version != old->version || s->code_count != old->code_count ||
+    BOOL relayout = ver != old_ver || s->code_count != old->code_count ||
                     s->quiet_zone != old->quiet_zone || s->module_px != old->module_px ||
                     s->settings_expanded != old->settings_expanded;
 
@@ -519,11 +615,14 @@ BOOL app_pretranslate(MSG *m)
     if (m->message != WM_KEYDOWN || !g_app.hwnd || (m->hwnd != g_app.hwnd && !IsChild(g_app.hwnd, m->hwnd)))
         return FALSE;
     focus = GetFocus();
-    in_ctrl = focus && focus != g_app.hwnd && focus != g_app.view && focus != g_app.gear;
+    in_ctrl = focus && focus != g_app.hwnd && focus != g_app.view && focus != g_app.gear && focus != g_app.cam;
     ctrl = GetKeyState(VK_CONTROL) < 0;
     switch (m->wParam) {
     case VK_F2:
         app_toggle_settings();
+        return TRUE;
+    case VK_F3:
+        recv_window_show();
         return TRUE;
     case VK_ESCAPE:
         if (focus && SendMessageW(focus, CB_GETDROPPEDSTATE, 0, 0))
@@ -577,7 +676,7 @@ static void paint(HWND hwnd)
     build_status(text, CPW_COUNTOF(text));
     tr = rc;
     tr.left = A.status_h + dpi_scale(6, g_app.dpi);
-    tr.right -= dpi_scale(6, g_app.dpi);
+    tr.right -= A.status_h + dpi_scale(6, g_app.dpi);   /* camera button on the right */
     of = SelectObject(dc, g_app.font);
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, A.job.state == JOB_ERROR && A.has_cur && !A.pending ? RGB(176, 32, 32)
@@ -612,6 +711,9 @@ static LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_GEAR:
             app_toggle_settings();
             return 0;
+        case IDC_CAM:
+            recv_window_show();
+            return 0;
         case IDM_SHOWHIDE:
             if (IsWindowVisible(hwnd) && !IsIconic(hwnd))
                 app_hide();
@@ -620,6 +722,9 @@ static LRESULT CALLBACK main_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         case IDM_SNIP:
             app_start_snip();
+            return 0;
+        case IDM_RECEIVE:
+            recv_window_show();
             return 0;
         case IDM_PAUSE_MONITOR:
             toggle_cfg(&g_app.cfg.pause_monitor);
@@ -780,7 +885,8 @@ BOOL app_create(HINSTANCE hi, BOOL start_hidden)
     wc.hIconSm = g_app.icon_small;
     wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
     wc.lpszClassName = CPW_MAIN_CLASS;
-    if (!RegisterClassExW(&wc) || !qr_view_register(hi) || !settings_bar_register(hi) || !snip_register(hi))
+    if (!RegisterClassExW(&wc) || !qr_view_register(hi) || !settings_bar_register(hi) || !snip_register(hi) ||
+        !recv_window_register(hi))
         return FALSE;
     g_app.msg_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
     g_app.msg_show = RegisterWindowMessageW(L"CodeTrans.ShowWindow");
@@ -801,11 +907,21 @@ BOOL app_create(HINSTANCE hi, BOOL start_hidden)
                                  NULL);
     g_app.gear = CreateWindowExW(0, L"BUTTON", L"⚙", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_CENTER, 0, 0,
                                  10, 10, g_app.hwnd, (HMENU)(INT_PTR)IDC_GEAR, hi, NULL);
+    g_app.cam = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | BS_ICON | BS_CENTER, 0, 0,
+                                10, 10, g_app.hwnd, (HMENU)(INT_PTR)IDC_CAM, hi, NULL);
     g_app.bar = settings_bar_create(g_app.hwnd);
-    if (!g_app.view || !g_app.gear || !g_app.bar)
+    if (!g_app.view || !g_app.gear || !g_app.cam || !g_app.bar)
         return FALSE;
     make_fonts();
     settings_bar_sync();
+    {
+        HWND tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, NULL, WS_POPUP | TTS_ALWAYSTIP, CW_USEDEFAULT,
+                                   CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, g_app.hwnd, NULL, hi, NULL);
+        if (tip) {
+            add_tooltip(tip, g_app.gear, L"设置 (F2)");
+            add_tooltip(tip, g_app.cam, L"摄像头接收:用电脑摄像头扫手机上的码 (F3)");
+        }
+    }
 
     if (x == CW_USEDEFAULT) {
         /* first start: centre on the primary work area */
@@ -851,6 +967,7 @@ BOOL app_create(HINSTANCE hi, BOOL start_hidden)
 
 void app_shutdown(void)
 {
+    recv_window_close();
     producer_stop();
     pacer_stop();
     if (A.pending)

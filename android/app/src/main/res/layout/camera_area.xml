@@ -17,6 +17,45 @@
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
+    <!-- Top-left corner: live fps / analysis resolution chip, the developer panel (debug builds) below it. -->
+    <LinearLayout
+        android:id="@+id/topStart"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:layout_margin="8dp"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/fpsOverlay"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/overlay_chip"
+            android:fontFamily="monospace"
+            android:importantForAccessibility="no"
+            android:paddingStart="6dp"
+            android:paddingTop="3dp"
+            android:paddingEnd="6dp"
+            android:paddingBottom="3dp"
+            android:textColor="#FFFFFFFF"
+            android:textSize="11sp"
+            android:visibility="gone" />
+
+        <!-- Developer panel (debug builds): camera / queue / decoder / rx counters. -->
+        <TextView
+            android:id="@+id/diagPanel"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:background="#A6000000"
+            android:fontFamily="monospace"
+            android:importantForAccessibility="no"
+            android:padding="6dp"
+            android:textColor="#FFFFFFFF"
+            android:textSize="11sp"
+            android:visibility="gone" />
+    </LinearLayout>
+
     <View
         android:id="@+id/focusRing"
         android:layout_width="64dp"

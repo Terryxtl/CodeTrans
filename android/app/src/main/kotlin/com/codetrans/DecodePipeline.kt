@@ -23,21 +23,6 @@ import java.util.concurrent.atomic.AtomicLong
  * the caller drops the frame (back-pressure). A size change discards buffers of the old size.
  */
 class FramePool(val capacity: Int) {
-    private var regions = ConfirmedRegions()
-    private var geometryW = 0
-    private var geometryH = 0
-    private var geometryRotation = -1
-
-    /** Chosen on the serial analyzer, so in-flight old frames can only publish to their old cache. */
-    internal fun regionsFor(w: Int, h: Int, rotation: Int): ConfirmedRegions {
-        if (w != geometryW || h != geometryH || rotation != geometryRotation) {
-            regions = ConfirmedRegions()
-            geometryW = w
-            geometryH = h
-            geometryRotation = rotation
-        }
-        return regions
-    }
     private val free = ArrayDeque<ByteBuffer>()
     private var allocated = 0
     private var size = -1
@@ -88,9 +73,16 @@ class DecodePipeline(
     private val quadsBuf = object : ThreadLocal<IntArray>() {
         override fun initialValue() = IntArray(NativeCore.QUADS_SIZE)
     }
-    private val regionBuf = object : ThreadLocal<IntArray>() {
-        override fun initialValue() = IntArray(ConfirmedRegions.BUFFER_SIZE)
-    }
+
+    /**
+     * Native scan session: the confirmed-region cache shared by the decoder threads (locked
+     * inside the JNI bridge). Freed by [close] once every decoder thread has stopped.
+     */
+    private var session = if (rx != 0L && NativeCore.isAvailable) NativeCore.sessionNew() else 0L
+    /** Geometry the session's cache belongs to; touched on the serial analyzer (and reset by [start]). */
+    @Volatile private var geometryW = 0
+    @Volatile private var geometryH = 0
+    @Volatile private var geometryRotation = -1
 
     @Volatile private var executor: ThreadPoolExecutor? = null
     @Volatile private var pool: FramePool? = null
@@ -99,12 +91,20 @@ class DecodePipeline(
 
     @Volatile private var dumpDir: File? = null
     private val frameNo = AtomicLong()
-    val droppedFrames = AtomicLong()
+    /** Diagnostics counters (developer panel). */
+    val stats = PipelineStats()
+    /** Analyzer thread only. */
+    private val gaps = FrameGapEstimator()
+    @Volatile var threads = 0
+        private set
 
     val isRunning: Boolean get() = executor != null
 
     val analyzer = ImageAnalysis.Analyzer { image ->
         try {
+            stats.cameraFrames.incrementAndGet()
+            gaps.onFrame(image.imageInfo.timestamp)
+            stats.cameraMissed.set(gaps.missed)
             submit(image)
         } catch (t: Throwable) {
             Log.e(TAG, "analyzer failed", t)
@@ -118,6 +118,7 @@ class DecodePipeline(
         synchronized(lock) {
             if (executor != null || rx == 0L) return
             val n = threads.coerceIn(1, 8)
+            geometryW = 0 // a restart begins with an empty cache
             val latch = CountDownLatch(n)
             val idx = AtomicInteger()
             val factory = ThreadFactory { r ->
@@ -134,6 +135,7 @@ class DecodePipeline(
                 }, "cp-decode-${idx.incrementAndGet()}")
             }
             dumpDir = dumpFramesTo?.apply { mkdirs() }
+            this.threads = n
             pool = FramePool(n + 2)
             scannersGone = latch
             executor = ThreadPoolExecutor(n, n, 0L, TimeUnit.MILLISECONDS, LinkedBlockingQueue(), factory)
@@ -155,6 +157,11 @@ class DecodePipeline(
             pool = null
             scannersGone = null
         }
+        // The first frame after a restart is not a "gap". A frame being analysed right now
+        // can at worst miscount one gap; this only feeds the developer panel.
+        gaps.reset()
+        stats.frameWidth = 0
+        stats.frameHeight = 0
         ex.shutdownNow()
     }
 
@@ -169,40 +176,61 @@ class DecodePipeline(
         return true
     }
 
+    /** Frees the native session. Only after [awaitStopped] returned true; the pipeline cannot be restarted. */
+    fun close() {
+        synchronized(lock) {
+            if (session != 0L) NativeCore.sessionFree(session)
+            session = 0L
+        }
+    }
+
     private fun submit(image: ImageProxy) {
         val (ex, pool) = synchronized(lock) { (executor ?: return) to (pool ?: return) }
         val w = image.width
         val h = image.height
+        stats.frameWidth = w
+        stats.frameHeight = h
         val plane = image.planes[0]
         val buf = pool.acquire(w * h)
         if (buf == null) {
-            droppedFrames.incrementAndGet()
+            stats.queueDropped.incrementAndGet()
             return
         }
         NativeCore.copyPlane(plane.buffer, plane.rowStride, w, h, buf)
         val rotation = image.imageInfo.rotationDegrees
         val n = frameNo.incrementAndGet()
         val capturedAt = SystemClock.uptimeMillis()
-        val regions = pool.regionsFor(w, h, rotation)
+        // A new frame size / rotation makes every cached grid meaningless. Frames still in
+        // flight with an older number no longer touch the cache.
+        val sess = synchronized(lock) {
+            if (session != 0L && (w != geometryW || h != geometryH || rotation != geometryRotation)) {
+                NativeCore.sessionReset(session, n)
+            }
+            geometryW = w
+            geometryH = h
+            geometryRotation = rotation
+            session
+        }
         val dump = dumpDir?.takeIf { n % DUMP_EVERY == 0L }
         try {
-            ex.execute { decode(buf, w, h, rotation, pool, dump, n, capturedAt, regions) }
+            ex.execute { decode(buf, w, h, rotation, pool, dump, n, capturedAt, sess) }
         } catch (_: RejectedExecutionException) {
             pool.release(buf)
         }
     }
 
     private fun decode(buf: ByteBuffer, w: Int, h: Int, rotation: Int, pool: FramePool, dump: File?,
-                       n: Long, capturedAt: Long, regions: ConfirmedRegions) {
+                       n: Long, capturedAt: Long, sess: Long) {
         try {
             if (dump != null) writeFrame(dump, n, buf, w, h)
             val s = scanner.get() ?: return
             val q = quadsBuf.get()!!
             q[0] = 0
-            val geometry = regionBuf.get()!!
-            regions.seeds(n, capturedAt, geometry)
-            val ev = NativeCore.scan(s, rx, buf, w, h, q, geometry)
-            regions.observed(n, capturedAt, geometry, q)
+            val t0 = System.nanoTime()
+            val ev = if (sess != 0L) NativeCore.scanStep(s, rx, sess, buf, w, h, n, capturedAt, q)
+            else NativeCore.scan(s, rx, buf, w, h, q)
+            stats.scanNanos.addAndGet(System.nanoTime() - t0)
+            stats.decoded.incrementAndGet()
             if (ev != 0) onEvents(ev)
             val used = 1 + q[0].coerceIn(0, NativeCore.MAX_QUADS) * NativeCore.QUAD_INTS
             synchronized(lock) {

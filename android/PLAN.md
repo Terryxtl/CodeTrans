@@ -79,7 +79,8 @@ CodeTrans/
          ├─ cpp/
          │  ├─ CMakeLists.txt             # add_subdirectory(${CP_CORE}),CP_CORE = ../../../../../core
          │  ├─ jni_bridge.c               # JNI 入口、类和方法缓存
-         │  └─ scanner.c                  # quirc 封装:Y 平面 → 多码 payload
+         │  ├─ jni_tx.c                   # 发送端(手机 → 电脑):cp_tx + qrcodegen 模块矩阵
+         │  └─ (core/scan/scanner.c)      # quirc 封装:Y 平面 → 多码 payload,与 Windows 摄像头接收共用
          ├─ kotlin/com/codetrans/
          │  ├─ MainActivity.kt            # 主界面
          │  ├─ ScanViewModel.kt           # 状态:Idle / Receiving / Done / Error

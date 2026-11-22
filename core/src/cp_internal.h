@@ -169,16 +169,20 @@ int cp_files_next(const uint8_t *body, size_t len, size_t *off, cp_file_entry *e
 int cp_is_compressed_magic(const uint8_t *d, size_t n);
 /* Detects already-compressed content by file extension (png, zip, mp4, ...). */
 int cp_is_compressed_name(const char *name);
+/* Adaptive raw deflate (container.c): the smallest of several deflate
+ * configurations, tried on a sample. NULL (and *method = CP_COMP_STORE) when
+ * storing is better or memory runs out; free the result with mz_free. */
+uint8_t *cp_deflate_auto(const uint8_t *src, size_t n, size_t *out_n, int *method);
 
 /* ---- filenames (output.c) --------------------------------------------- */
 
-#define CP_NAME_MAX 120u
+/* cp_sanitize_name / cp_unique_name / CP_NAME_MAX are public (cp.h). */
 
-/* Sanitizes an untrusted UTF-8 file name into out (cap >= CP_NAME_MAX + 1). */
-void cp_sanitize_name(const uint8_t *in, size_t n, char *out, size_t cap);
-/* Makes name unique among names[0..count) (ASCII case-insensitive) by
- * inserting " (1)", " (2)", ... before the extension. In place, cap >= 121. */
-void cp_unique_name(char *name, size_t cap, char *const *names, size_t count);
+/* Decodes one strict UTF-8 code point (no overlong, surrogates or > U+10FFFF);
+ * returns its length, or 0 if invalid / truncated (container.c). */
+size_t cp_utf8_decode(const uint8_t *s, size_t n, uint32_t *cp);
+/* MIME of a strictly recognised image signature (PNG, JPEG, GIF, WebP, BMP), or NULL. */
+const char *cp_image_mime_sniff(const uint8_t *d, size_t n);
 
 /* ---- RaptorQ wrapper (fec_rq.c) --------------------------------------- */
 
@@ -276,6 +280,85 @@ int d3_container_unpack(const uint8_t *c, size_t n, d3_file *f, uint8_t **owned)
 /* Sender: converts a CPO1 container into a DCF2 one (text -> snippet,
  * image -> image.<ext>, one file -> as is, several -> stored zip). */
 int d3_from_cpo(const uint8_t *cpo, size_t n, uint8_t **out, size_t *out_n, int *gzipped);
+
+/* ---- CodeTrans optical board, "OB" (ob_fec.c, ob.c, ob_locate.c) --------
+ * Experimental non-QR screen-to-camera format, port of the
+ * CodeTrans-Optical-Reference package (protocol.py / tile.c / acquire.py).
+ * One board = 177 x 177 black / white modules: four oriented 7x7 corner marks,
+ * known pilot modules, and 6 rows x 4 columns of 40 x 28 data rectangles.
+ * Each rectangle carries 140 octets (one octet = a 4x2 module patch, upper
+ * row first, MSB first), XOR-ed with a fixed per-rectangle mask.
+ *   tiles: every rectangle is one RS(140,124) unit  -> 24 x 108 B per board
+ *   bands: one row of 4 rectangles is one unit of four interleaved
+ *          RS(140,132) lanes                       ->  6 x 512 B per board
+ * Unit body = 12-byte header (8 B session tag, u16 group, u8 row, u8 type;
+ * little-endian) + fixed-length payload, protected by CRC-32C (Castagnoli).
+ * Outer code: systematic Cauchy-style erasure code over GF(256) / 0x11d in
+ * groups of <= 32 source rows; repair rows 32..255. */
+
+#define OB_SIDE           177
+#define OB_ROWS           6
+#define OB_COLS           4
+#define OB_SLOTS          (OB_ROWS * OB_COLS)
+#define OB_N              140      /* octets per rectangle                     */
+#define OB_HDR_LEN        12u
+#define OB_TILE_BODY      120u     /* header + 108-byte payload                */
+#define OB_BAND_BODY      524u     /* header + 512-byte payload                */
+#define OB_TILE_DATA      108u
+#define OB_BAND_DATA      512u
+#define OB_GROUP          32
+#define OB_MANIFEST_GROUP 0xFFFFu
+#define OB_TYPE_TILE      0x10u    /* | 1 = session manifest                   */
+#define OB_TYPE_BAND      0x20u
+#define OB_MAX_FILE       (64u << 20)
+#define OB_PENDING_MAX    768      /* units buffered before their manifest     */
+#define OB_TRACK_MIN_SCORE 0.68f
+
+/* inner / outer codes (ob_fec.c); tables are built on first use, thread-safe */
+uint32_t ob_crc32c(const uint8_t *s, size_t n);
+void     ob_tile_encode(const uint8_t body[OB_TILE_BODY], uint8_t wire[OB_N]);
+/* 1 = raw CRC pass, 2 = hard RS, 3 = RS with erasures, 0 = discard */
+int      ob_tile_decode(const uint8_t wire[OB_N], const uint8_t *erasures, int count, uint8_t body[OB_TILE_BODY]);
+void     ob_band_encode(const uint8_t body[OB_BAND_BODY], uint8_t wire[4 * OB_N]);
+/* erasures: four lists of up to 8 lane-byte positions (4 x 8), counts[4] <= 8 */
+int      ob_band_decode(const uint8_t wire[4 * OB_N], const uint8_t *erasures, const uint8_t *counts,
+                        uint8_t body[OB_BAND_BODY]);
+/* source: k adjacent rows of `bytes` octets. row < k (copy) or 32..255. 1 = ok */
+int      ob_outer_symbol(const uint8_t *source, int k, int bytes, int row, uint8_t *out);
+/* exactly k distinct valid rows; out (k * bytes) must not overlap the input. 1 = ok */
+int      ob_outer_recover(const uint8_t *ids, const uint8_t *symbols, int k, int bytes, uint8_t *out);
+
+/* board layout, rendering and registered read (ob.c) */
+void     ob_layout_init(void);                  /* idempotent, thread-safe          */
+extern uint8_t ob_pilots[OB_SIDE * OB_SIDE];      /* 1 = white (tiles profile)       */
+extern uint8_t ob_pilot_score[OB_SIDE * OB_SIDE]; /* known pilots used for scoring    */
+/* profile CP_OB_*; bodies: OB_SLOTS (tiles) or OB_ROWS (bands) unit bodies of
+ * OB_TILE_BODY / OB_BAND_BODY bytes back to back. Writes 1 = white modules. */
+void     ob_draw(int profile, const uint8_t *bodies, uint8_t white[OB_SIDE * OB_SIDE]);
+
+typedef struct ob_unit {
+    int      index;              /* tile 0..23 or band 0..5            */
+    int      status;             /* ob_*_decode result (1..3)          */
+    size_t   len;                /* OB_TILE_BODY / OB_BAND_BODY        */
+    uint8_t  body[OB_BAND_BODY];
+} ob_unit;
+/* luma: 177 x 177 samples at module centres. Regular pass, then one spatially
+ * equalized pass for the units that failed when fewer than 85 % passed.
+ * Returns the number of units written to out (room for OB_SLOTS). */
+int      ob_read_board(const float *luma, ob_unit *out);
+
+/* sender carousel (ob.c) */
+typedef struct ob_enc ob_enc;
+ob_enc  *ob_enc_new(const uint8_t *data, size_t n, int profile);
+/* Next display refresh: `boards` boards into white (boards * 177 * 177, 1 = white). */
+int      ob_enc_boards(ob_enc *e, int boards, uint8_t *white);
+uint32_t ob_enc_rows(const ob_enc *e);
+uint32_t ob_enc_width(const ob_enc *e);
+void     ob_enc_tag(const ob_enc *e, uint8_t tag[8]);
+void     ob_enc_free(ob_enc *e);
+
+/* receiver entry for one CRC-verified unit body (rx.c). Returns CP_EV_* bits. */
+int      ob_rx_feed(cp_rx *rx, const uint8_t *body, size_t n);
 
 /* ---- platform shim (platform.c) --------------------------------------- */
 

@@ -8,24 +8,26 @@
 
 | 目录 | 内容 |
 |---|---|
-| [`windows/`](windows/README.md) | Windows 发送端:单个便携 exe,支持 Win7 SP1 – Win11(32/64 位) |
-| [`android/`](android/PLAN.md) | Android 接收端(minSdk 24),CameraX + quirc / ZXing 扫码 |
-| `core/` | 两端共用的 C11 协议核心:分帧、RaptorQ 喷泉码、容器格式,以及 Decimen v3 兼容层 |
+| [`windows/`](windows/README.md) | Windows 端:单个便携 exe,支持 Win7 SP1 – Win11(32/64 位);播放二维码,也能用摄像头接收手机发来的码(F3) |
+| [`android/`](android/PLAN.md) | Android 端（minSdk 24）。「发送到电脑」可选择 Decimen v3 RS96（默认）、光传码面横带或分块（实验），支持同屏显示 1–2 个码。 |
+| `core/` | 两端共用的 C11 协议核心:分帧、RaptorQ 喷泉码、容器格式(自适应压缩)、Decimen v3 兼容层、相机扫码器(`core/scan/`),以及实验性的光传码面 |
 
-支持两种协议:CodeTrans v1(RaptorQ, RFC 6330)和 Decimen v3(LT / Cauchy RS-96),可与 decimen.app / decimen-cli 互通。
+两端均可接收 CodeTrans v1（RaptorQ，RFC 6330）、Decimen v3（LT / Cauchy RS-96）和实验性的光传码面。Decimen v3 支持与相应版本的 decimen.app / decimen-cli 互通。手机发送多文件时，RS96 将文件打成一个 ZIP，光传码面保留独立文件。横带和分块使用固定的 177 × 177 模块，需要 CodeTrans 接收端。[光传码面说明](core/OPTICAL_BOARD.md)
 
 ## 下载
 
-[Actions](https://github.com/Terryxtl/CodeTrans/actions/workflows/build.yml) 里每次构建都会产出 `CodeTrans.exe` 和 APK;推送 `v*` 标签时会自动发布到 [Releases](https://github.com/Terryxtl/CodeTrans/releases)。
+[Releases](https://github.com/Terryxtl/CodeTrans/releases) 提供 Windows 便携版 `CodeTrans.exe`，以及 Android 签名版 `CodeTrans-armv7-release.apk`（32 位 ARM）和 `CodeTrans-arm64-release.apk`（64 位 ARM）。
+
+[Actions](https://github.com/Terryxtl/CodeTrans/actions/workflows/build.yml) 会在推送到 `main` 或向 `main` 提交 PR 时运行测试，并上传 Windows EXE 和 Android 调试 APK。推送 `v*` 版本标签，或手动运行 `Build` 并填写 `release_tag`（例如 `v0.1.0`），会构建并发布上述三个文件。
 
 ## 构建
 
 - **Windows**:需要 [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) 的 msvcrt 版、CMake ≥ 3.20、Ninja,运行 `windows/build.sh`。详见 [windows/README.md](windows/README.md)。
-- **Android**:JDK 17+(推荐 21)、Android SDK 37、NDK 30.0.14904198、CMake 3.22.1,在 `android/` 下运行 `./gradlew assembleRelease`。release 签名配置放在 `android/signing/signing.properties`(不入库),没有时产出未签名包。
+- **Android**:JDK 17+(推荐 21)、Android SDK 37、NDK 30.0.14904198、CMake 3.22.1,在 `android/` 下运行 `./gradlew :app:assembleRelease -PsplitReleaseApks=true` 生成两个 ARM APK。release 签名配置放在 `android/signing/signing.properties`(不入库),没有时产出未签名包。
 
-### CI 签名(可选)
+### 发布签名
 
-在仓库 Settings → Secrets and variables → Actions 中添加以下 Secrets 后,CI 产出的 release APK 会自动签名:
+发布流程使用仓库 Settings → Secrets and variables → Actions 中的以下 Secrets 为 APK 签名。调试构建使用 Android 的默认调试签名。
 
 | Secret | 内容 |
 |---|---|

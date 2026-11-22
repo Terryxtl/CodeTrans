@@ -1,6 +1,8 @@
 package com.codetrans
 
 import android.graphics.BitmapFactory
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.google.common.truth.Truth.assertThat
@@ -24,6 +26,57 @@ class NativeCoreTest {
     private lateinit var outDir: File
     private var rx = 0L
     private var scanner = 0L
+
+    @Test
+    fun safeNamesFollowCoreRules() {
+        val out = NativeCore.safeNames(
+            listOf("a..b.txt", "CON", "Ä.txt", "ä.txt", "‮txt.exe", "Привет", "привет"),
+        )
+        assertThat(out).containsExactly(
+            "a_b.txt", "_CON", "Ä.txt", "ä (1).txt", "txt.exe", "Привет",
+            "привет (1)",
+        ).inOrder()
+    }
+
+    @Test
+    fun kotlinConstantsMirrorCoreHeader() {
+        val c = IntArray(NativeCore.CONSTANTS_SIZE).also { NativeCore.constants(it) }
+        assertThat(c.toList()).containsExactly(
+            NativeCore.QR_VERSION_MIN, NativeCore.QR_VERSION_MAX, NativeCore.OB_SIDE,
+            NativeCore.OB_BANDS_UNITS, NativeCore.OB_BANDS_UNIT_BYTES,
+            NativeCore.OB_TILES_UNITS, NativeCore.OB_TILES_UNIT_BYTES, NativeCore.MAX_CODES, 2953,
+        ).inOrder()
+        assertThat(SendMath.VERSIONS.all { it in NativeCore.QR_VERSION_MIN..NativeCore.QR_VERSION_MAX }).isTrue()
+        assertThat(NativeCore.qrCapacity(15, 0)).isEqualTo(520)
+        assertThat(NativeCore.qrCapacity(41, 0)).isEqualTo(0)
+    }
+
+    @Test
+    fun pacingRoundsToWholeRefreshes() {
+        assertThat(NativeCore.paceVblanks(45, 60.0)).isEqualTo(1)
+        assertThat(NativeCore.paceVblanks(30, 60.0)).isEqualTo(2)
+        assertThat(NativeCore.paceVblanks(24, 60.0)).isEqualTo(3)
+        assertThat(NativeCore.paceEffectiveFps(45, 60.0)).isWithin(1e-9).of(60.0)
+        assertThat(NativeCore.paceEffectiveFps(24, 60.0)).isWithin(1e-9).of(20.0)
+        assertThat(NativeCore.paceEffectiveFps(30, 0.0)).isWithin(1e-9).of(30.0)
+    }
+
+    @Test
+    fun etaFollowsUnitsPerFrame() {
+        val data = ByteArray(40_000) { (it * 31).toByte() }
+        for ((proto, profile) in listOf(NativeCore.PROTO_D3 to 0, NativeCore.PROTO_OB to NativeCore.OB_BANDS)) {
+            val tx = NativeCore.txNew(NativeCore.KIND_FILES, arrayOf("e.bin".toByteArray()), arrayOf(data), null,
+                proto, profile, 27, 0)
+            assertThat(tx).isNotEqualTo(0L)
+            try {
+                val info = LongArray(NativeCore.TX_INFO_SIZE).also { NativeCore.txInfo(tx, it) }
+                val units = if (proto == NativeCore.PROTO_D3) 2.0 else 12 - 1.0 / 16
+                assertThat(NativeCore.txEtaSeconds(tx, 2, 10.0)).isWithin(1e-9).of(info[4] / (units * 10))
+            } finally {
+                NativeCore.txFree(tx)
+            }
+        }
+    }
 
     @Before
     fun setUp() {
@@ -71,6 +124,62 @@ class NativeCoreTest {
         assets.list("frames")!!.filter { it.startsWith(prefix) && it.endsWith(".png") }.sorted()
 
     private fun asset(name: String) = assets.open("frames/$name").use { it.readBytes() }
+
+    @Test
+    fun phoneSenderModesRecoverFileFromDisplayedFrames() {
+        val data = asset("file1.bin")
+        val width = 1180
+        val height = 620
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val pixels = IntArray(width * height)
+        val y = ByteBuffer.allocateDirect(pixels.size)
+        lateinit var player: QrPlayerView
+        instr.runOnMainSync {
+            player = QrPlayerView(instr.targetContext)
+            player.layout(0, 0, width, height)
+        }
+        try {
+            for ((proto, profile) in listOf(NativeCore.PROTO_D3 to 0,
+                NativeCore.PROTO_OB to NativeCore.OB_BANDS, NativeCore.PROTO_OB to NativeCore.OB_TILES)) {
+                for (count in 1..2) {
+                    NativeCore.rxReset(rx)
+                    val tx = NativeCore.txNew(NativeCore.KIND_FILES, arrayOf("source.bin".toByteArray()),
+                        arrayOf(data), null, proto, profile, 15, 0)
+                    assertThat(tx).isNotEqualTo(0L)
+                    try {
+                        val side = if (proto == NativeCore.PROTO_D3) 77 else NativeCore.OB_SIDE
+                        val modules = ByteArray(count * side * side)
+                        val info = LongArray(NativeCore.TX_INFO_SIZE).also { NativeCore.txInfo(tx, it) }
+                        if (proto == NativeCore.PROTO_OB)
+                            assertThat(info[3]).isEqualTo(if (profile == NativeCore.OB_BANDS) 512L else 108L)
+                        var ev = 0
+                        repeat(80) {
+                            if (ev and NativeCore.EV_COMPLETE != 0) return@repeat
+                            assertThat(NativeCore.txNextFrame(tx, count, 30, modules)).isEqualTo(side)
+                            instr.runOnMainSync {
+                                player.show(side, count, modules)
+                                player.draw(canvas)
+                            }
+                            bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+                            y.clear()
+                            for (p in pixels) y.put(p.toByte()) // grayscale bitmap
+                            ev = ev or NativeCore.scan(scanner, rx, y, width, height, null)
+                        }
+                        assertThat(ev and NativeCore.EV_COMPLETE).isNotEqualTo(0)
+                        val result = NativeCore.takeResult(rx)!!
+                        assertThat(result.names.single()).isEqualTo("source.bin")
+                        assertThat(File(result.paths.single()).readBytes()).isEqualTo(data)
+                    } finally {
+                        NativeCore.txFree(tx)
+                    }
+                }
+            }
+        } finally {
+            instr.runOnMainSync { player.clear() }
+            bitmap.recycle()
+        }
+    }
 
     private fun scanAll(
         prefix: String,
@@ -222,13 +331,10 @@ class NativeCoreTest {
         repeat(16) { assertThat(reads(damaged)).isEqualTo(1) }
 
         val secondWorker = NativeCore.scannerNew()
+        val session = NativeCore.sessionNew()
         try {
-            val cache = ConfirmedRegions()
-            val regions = IntArray(ConfirmedRegions.BUFFER_SIZE)
             fun scan(worker: Long, y: ByteBuffer, frame: Long, ms: Long): Int {
-                cache.seeds(frame, ms, regions)
-                NativeCore.scan(worker, rx, y, clean.w, clean.h, quads, regions)
-                cache.observed(frame, ms, regions)
+                NativeCore.scanStep(worker, rx, session, y, clean.w, clean.h, frame, ms, quads)
                 return DetectedCodes(clean.w, clean.h, 0, quads, frame, ms).decodedCount
             }
             val blank = ByteBuffer.allocateDirect(clean.w * clean.h)
@@ -236,7 +342,11 @@ class NativeCoreTest {
             assertThat(scan(secondWorker, blank, 2, 150)).isEqualTo(0)
             assertThat(scan(secondWorker, damaged, 3, 950)).isEqualTo(1)
             assertThat(scan(secondWorker, damaged, 4, 2600)).isEqualTo(0)
+            // A geometry change forgets the grid: frames older than the reset cannot seed or publish.
+            NativeCore.sessionReset(session, 10)
+            assertThat(scan(secondWorker, damaged, 11, 2650)).isEqualTo(0)
         } finally {
+            NativeCore.sessionFree(session)
             NativeCore.scannerFree(secondWorker)
         }
     }
@@ -248,9 +358,10 @@ class NativeCoreTest {
         val size = 512
         val pixels = ByteArray(size * size)
         val distorted = ByteBuffer.allocateDirect(pixels.size)
-        val regions = IntArray(ConfirmedRegions.BUFFER_SIZE)
+        val session = NativeCore.sessionNew()
         val quads = IntArray(NativeCore.QUADS_SIZE)
         var events = 0
+        var frameNo = 0L
         for (name in frames("d3lt_")) {
             val f = loadFrame(name)
             for (offset in intArrayOf(0, 620)) {
@@ -274,16 +385,43 @@ class NativeCoreTest {
                 }
                 val cold = NativeCore.scannerNew()
                 try {
-                    regions[0] = 0
-                    events = events or NativeCore.scan(cold, rx, distorted, size, size, quads, regions)
-                    assertThat(regions[0]).isEqualTo(1)
+                    frameNo++
+                    events = events or NativeCore.scanStep(cold, rx, session, distorted, size, size, frameNo, frameNo * 33, quads)
+                    assertThat(DetectedCodes(size, size, 0, quads, frameNo, 0).decodedCount).isEqualTo(1)
                 } finally {
                     NativeCore.scannerFree(cold)
                 }
             }
         }
+        NativeCore.sessionFree(session)
         assertThat(events and NativeCore.EV_COMPLETE).isNotEqualTo(0)
         assertThat(File(NativeCore.takeResult(rx)!!.paths.single()).readBytes()).isEqualTo(asset("file1.bin"))
+    }
+
+    /** The JNI wrapper of the shared quad tracker: confirmed read boxes, fade, late frames. */
+    @Test
+    fun quadTrackerKeepsReadBoxesAndDropsLateFrames() {
+        val tracker = QuadTracker()
+        try {
+            fun frame(n: Long, decoded: Int, x: Int, t: Long) = DetectedCodes(
+                1920, 1080, 90,
+                intArrayOf(1, decoded, x, 100, x + 400, 100, x + 400, 500, x, 500), n, t,
+            )
+            val first = tracker.update(frame(5, 1, 100, 165), 165)
+            assertThat(first.count).isEqualTo(1)
+            assertThat(first.readCount).isEqualTo(1)
+            assertThat(first.sightedCount).isEqualTo(1)
+            assertThat(first.opacity.single()).isEqualTo(1f)
+            val moved = tracker.update(frame(6, 1, 140, 198), 198)
+            assertThat(moved.quads.single()[0]).isWithin(0.01f).of(120f)
+            val late = tracker.update(frame(4, 1, 900, 200), 200)
+            assertThat(late.quads.single()[0]).isWithin(0.01f).of(120f)
+            val fading = tracker.snapshot(198 + 300)
+            assertThat(fading.opacity.single()).isWithin(0.02f).of(0.5f)
+            assertThat(tracker.snapshot(198 + 500).count).isEqualTo(0)
+        } finally {
+            tracker.close()
+        }
     }
 
     @Test

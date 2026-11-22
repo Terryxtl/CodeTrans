@@ -49,6 +49,7 @@ void tray_menu(HWND hwnd, const app_settings *s, BOOL window_visible, BOOL snip_
         return;
     AppendMenuW(m, MF_STRING, IDM_SHOWHIDE, window_visible ? L"隐藏窗口" : L"显示窗口");
     AppendMenuW(m, MF_STRING | (snip_available ? 0 : MF_GRAYED), IDM_SNIP, L"截图");
+    AppendMenuW(m, MF_STRING, IDM_RECEIVE, L"摄像头接收(手机 → 电脑)\tF3");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     AppendMenuW(m, MF_STRING | (s->pause_monitor ? MF_CHECKED : 0), IDM_PAUSE_MONITOR, L"暂停监听剪切板");
     AppendMenuW(m, MF_STRING | (s->force_builtin_snip ? MF_CHECKED : 0), IDM_FORCE_SNIP, L"强制使用内置截图");

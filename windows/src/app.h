@@ -30,7 +30,9 @@ enum {
     IDM_FORCE_SNIP,
     IDM_AUTOSTART,
     IDM_EXIT,
+    IDM_RECEIVE,       /* camera receiver (phone -> PC) */
     IDC_GEAR = 200,
+    IDC_CAM,           /* camera button: opens the camera receiver */
     IDC_SB_FIRST = 300
 };
 
@@ -41,7 +43,9 @@ typedef struct app_ctx {
     HWND         hwnd;          /* main window              */
     HWND         view;          /* QR code area             */
     HWND         bar;           /* settings bar             */
-    HWND         gear;          /* ⚙ button                 */
+    HWND         gear;          /* ⚙ button (bottom left)    */
+    HWND         cam;           /* camera button (bottom right) */
+    HICON        cam_icon;      /* drawn for the current DPI */
     HICON        icon_big, icon_small;
     app_settings cfg;
     UINT         dpi;

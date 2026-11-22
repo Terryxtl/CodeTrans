@@ -12,7 +12,6 @@
 
 #include <windows.h>
 #include "content.h"
-#include "qr_geom.h"
 #include "cp.h"
 
 typedef struct job_params {
@@ -50,7 +49,7 @@ void producer_set_params(const job_params *p);
 
 /* Pacer side, non-blocking. Copies the oldest ready frame into *dst (grown
  * with realloc as needed) and its geometry into *g. 1 = got a frame. */
-int  producer_pop(uint8_t **dst, size_t *cap, frame_geom *g);
+int  producer_pop(uint8_t **dst, size_t *cap, cp_frame_geom *g);
 /* TRUE while a session is being prepared or played. */
 BOOL producer_busy(void);
 

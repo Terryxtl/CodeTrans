@@ -707,11 +707,12 @@ uint8_t *d3_dec_assemble(const d3_dec *d)
 
 /* ---- gzip ------------------------------------------------------------------ */
 
+/* NULL when deflate cannot save 5 % (the caller then stores the content). */
 static uint8_t *gzip_mem(const uint8_t *src, size_t n, size_t *out_n)
 {
-    int flags = (int)tdefl_create_comp_flags_from_zip_params(6, -MZ_DEFAULT_WINDOW_BITS, MZ_DEFAULT_STRATEGY);
     size_t dl = 0;
-    uint8_t *def = (uint8_t *)tdefl_compress_mem_to_heap(src, n, &dl, flags), *out;
+    int method;
+    uint8_t *def = cp_deflate_auto(src, n, &dl, &method), *out;   /* same chooser as CPO1 */
     static const uint8_t hdr[10] = { 0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 0xff };
     *out_n = 0;
     if (!def)

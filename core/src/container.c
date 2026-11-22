@@ -10,12 +10,71 @@ struct cp_payload {
     int      kind;
     uint64_t raw_len;
     int      compressed;
+    int      method;    /* CP_COMP_* */
 };
 
-#define CPO_SAMPLE_BYTES (64u * 1024u)
-#define CPO_LEVEL        6
 
 /* ---- helpers ------------------------------------------------------------ */
+
+size_t cp_utf8_decode(const uint8_t *s, size_t n, uint32_t *cp)
+{
+    uint32_t c;
+    size_t len, i;
+    if (n == 0)
+        return 0;
+    c = s[0];
+    if (c < 0x80) {
+        *cp = c;
+        return 1;
+    }
+    if ((c & 0xE0) == 0xC0) { len = 2; c &= 0x1F; }
+    else if ((c & 0xF0) == 0xE0) { len = 3; c &= 0x0F; }
+    else if ((c & 0xF8) == 0xF0) { len = 4; c &= 0x07; }
+    else return 0;
+    if (n < len)
+        return 0;
+    for (i = 1; i < len; i++) {
+        if ((s[i] & 0xC0) != 0x80)
+            return 0;
+        c = (c << 6) | (s[i] & 0x3F);
+    }
+    if ((len == 2 && c < 0x80) || (len == 3 && c < 0x800) || (len == 4 && (c < 0x10000 || c > 0x10FFFF)) ||
+        (c >= 0xD800 && c <= 0xDFFF))
+        return 0;   /* overlong / surrogate / out of range */
+    *cp = c;
+    return len;
+}
+
+int cp_utf8_valid(const uint8_t *s, size_t n)
+{
+    size_t i = 0;
+    while (i < n) {
+        uint32_t c;
+        size_t l = cp_utf8_decode(s + i, n - i, &c);
+        if (l == 0)
+            return 0;
+        i += l;
+    }
+    return 1;
+}
+
+size_t cp_text_bom_len(const uint8_t *s, size_t n)
+{
+    return (s && n >= 3 && s[0] == 0xEF && s[1] == 0xBB && s[2] == 0xBF) ? 3 : 0;
+}
+
+const char *cp_image_mime_sniff(const uint8_t *d, size_t n)
+{
+    static const uint8_t png[8] = { 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A };
+    if (!d)
+        return NULL;
+    if (n >= 8 && !memcmp(d, png, 8)) return "image/png";
+    if (n >= 3 && d[0] == 0xFF && d[1] == 0xD8 && d[2] == 0xFF) return "image/jpeg";
+    if (n >= 6 && (!memcmp(d, "GIF87a", 6) || !memcmp(d, "GIF89a", 6))) return "image/gif";
+    if (n >= 12 && !memcmp(d, "RIFF", 4) && !memcmp(d + 8, "WEBP", 4)) return "image/webp";
+    if (n >= 2 && d[0] == 'B' && d[1] == 'M') return "image/bmp";
+    return NULL;
+}
 
 size_t cp_utf8_cut(const uint8_t *s, size_t n)
 {
@@ -112,15 +171,97 @@ static int compressed_mime(const char *mime)
     return 0;
 }
 
-/* raw deflate level 6; NULL if allocation fails */
-static uint8_t *deflate_raw(const uint8_t *src, size_t n, size_t *out_n)
+/* ---- adaptive deflate ---------------------------------------------------
+ * Any raw deflate stream inflates the same way, so the encoder settings can be
+ * chosen per payload without the receiver knowing (old receivers included).
+ * Candidates, cheapest first; a slower one has to beat the best so far by more
+ * than 1/2 % on the sample to be chosen. */
+static const struct {
+    int method, level, strategy;
+} k_cand[] = {
+    { CP_COMP_HUFFMAN, 1, MZ_HUFFMAN_ONLY },  /* byte statistics only: noise-like data, audio   */
+    { CP_COMP_RLE, 6, MZ_RLE },               /* runs only: sparse data, flat images, bitmaps   */
+    { CP_COMP_FAST, 1, MZ_DEFAULT_STRATEGY },
+    { CP_COMP_DEFAULT, 6, MZ_DEFAULT_STRATEGY },
+    { CP_COMP_FILTERED, 9, MZ_FILTERED },     /* short matches filtered: numeric tables, deltas */
+    { CP_COMP_MAX, 9, MZ_DEFAULT_STRATEGY },
+    { CP_COMP_MAX, 10, MZ_DEFAULT_STRATEGY }, /* miniz "uber": exhaustive matching, small input */
+};
+#define CPO_SAMPLE_CHUNK   (32u * 1024u)
+#define CPO_UBER_MAX       (4u << 20)       /* level 10 only up to 4 MiB                      */
+#define CPO_SLOW_MAX       (32u << 20)      /* above this, levels > 6 cost too much time      */
+
+static uint8_t *deflate_with(const uint8_t *src, size_t n, size_t *out_n, int level, int strategy)
 {
-    int flags = (int)tdefl_create_comp_flags_from_zip_params(CPO_LEVEL, -MZ_DEFAULT_WINDOW_BITS, MZ_DEFAULT_STRATEGY);
+    int flags = (int)tdefl_create_comp_flags_from_zip_params(level, -MZ_DEFAULT_WINDOW_BITS, strategy);
     *out_n = 0;
     return (uint8_t *)tdefl_compress_mem_to_heap(src, n, out_n, flags);
 }
 
 static int ratio_ok(size_t out, size_t in) { return (uint64_t)out * 100u <= (uint64_t)in * 95u; }
+
+uint8_t *cp_deflate_auto(const uint8_t *src, size_t n, size_t *out_n, int *method)
+{
+    uint8_t *sample = NULL, *out = NULL, *kept = NULL;
+    const uint8_t *s = src;
+    size_t sn = n, best_len = (size_t)-1, i;
+    int best = -1;
+
+    *out_n = 0;
+    *method = CP_COMP_STORE;
+    if (!src || n < 64)
+        return NULL;
+    /* sample: the whole body, or 32 KiB from its start, middle and end (a
+     * file is often text at the front and already-compressed data behind) */
+    if (n > 4 * CPO_SAMPLE_CHUNK) {
+        sample = (uint8_t *)malloc(3 * CPO_SAMPLE_CHUNK);
+        if (!sample)
+            return NULL;
+        memcpy(sample, src, CPO_SAMPLE_CHUNK);
+        memcpy(sample + CPO_SAMPLE_CHUNK, src + n / 2 - CPO_SAMPLE_CHUNK / 2, CPO_SAMPLE_CHUNK);
+        memcpy(sample + 2 * CPO_SAMPLE_CHUNK, src + n - CPO_SAMPLE_CHUNK, CPO_SAMPLE_CHUNK);
+        s = sample;
+        sn = 3 * CPO_SAMPLE_CHUNK;
+    }
+    for (i = 0; i < sizeof k_cand / sizeof k_cand[0]; i++) {
+        size_t len = 0;
+        uint8_t *t;
+        if (k_cand[i].level > 9 && n > CPO_UBER_MAX)
+            continue;
+        if (k_cand[i].level > 6 && n > CPO_SLOW_MAX)
+            continue;
+        t = deflate_with(s, sn, &len, k_cand[i].level, k_cand[i].strategy);
+        if (t && (best < 0 || (uint64_t)len * 1000u < (uint64_t)best_len * 995u)) {
+            best = (int)i;
+            best_len = len;
+            if (!sample) {            /* the sample is the body: keep the winner */
+                mz_free(kept);
+                kept = t;
+                t = NULL;
+            }
+        }
+        mz_free(t);
+    }
+    free(sample);
+    if (best < 0 || !ratio_ok(best_len, sn)) {
+        mz_free(kept);
+        return NULL;                  /* incompressible: send it as it is */
+    }
+    if (kept) {
+        out = kept;
+        *out_n = best_len;
+    } else {
+        out = deflate_with(src, n, out_n, k_cand[best].level, k_cand[best].strategy);
+    }
+    if (out && !ratio_ok(*out_n, n)) {
+        mz_free(out);
+        *out_n = 0;
+        return NULL;
+    }
+    if (out)
+        *method = k_cand[best].method;
+    return out;
+}
 
 /* Assembles header + meta + body (compressing if worthwhile). */
 static cp_payload *build(int kind, const char *meta, const uint8_t *body, size_t body_len, int try_compress)
@@ -131,26 +272,16 @@ static cp_payload *build(int kind, const char *meta, const uint8_t *body, size_t
     size_t comp_len = 0;
     const uint8_t *use = body;
     size_t use_len = body_len;
-    int compressed = 0;
+    int compressed = 0, method = CP_COMP_STORE;
 
     if (meta_len > 0xFFFFu || (uint64_t)body_len > CP_MAX_TOTAL_BYTES)
         return NULL;
-    if (try_compress && body_len >= 64) {
-        int go = 1;
-        if (body_len > CPO_SAMPLE_BYTES) {
-            size_t sl = 0;
-            uint8_t *s = deflate_raw(body, CPO_SAMPLE_BYTES, &sl);
-            if (!s || !ratio_ok(sl, CPO_SAMPLE_BYTES))
-                go = 0;
-            mz_free(s);
-        }
-        if (go) {
-            comp = deflate_raw(body, body_len, &comp_len);
-            if (comp && ratio_ok(comp_len, body_len)) {
-                use = comp;
-                use_len = comp_len;
-                compressed = 1;
-            }
+    if (try_compress) {
+        comp = cp_deflate_auto(body, body_len, &comp_len, &method);
+        if (comp) {
+            use = comp;
+            use_len = comp_len;
+            compressed = 1;
         }
     }
     if ((uint64_t)CPO_HDR_LEN + meta_len + use_len > CP_MAX_TOTAL_BYTES) {
@@ -182,6 +313,7 @@ static cp_payload *build(int kind, const char *meta, const uint8_t *body, size_t
     p->kind = kind;
     p->raw_len = body_len;
     p->compressed = compressed;
+    p->method = method;
     return p;
 }
 
@@ -192,21 +324,10 @@ cp_payload *cp_payload_text(const char *utf8, size_t n)
     const uint8_t *s = (const uint8_t *)utf8;
     if (!s && n)
         return NULL;
-    if (n >= 3 && s[0] == 0xEF && s[1] == 0xBB && s[2] == 0xBF) {   /* no BOM on the wire */
-        s += 3;
-        n -= 3;
-    }
+    size_t bom = cp_text_bom_len(s, n);   /* no BOM on the wire */
+    s += bom;
+    n -= bom;
     return build(CP_KIND_TEXT, "mime=text/plain\n", s ? s : (const uint8_t *)"", n, 1);
-}
-
-static const char *sniff_image_mime(const uint8_t *d, size_t n)
-{
-    if (n >= 4 && d[0] == 0x89 && d[1] == 'P' && d[2] == 'N' && d[3] == 'G') return "image/png";
-    if (n >= 3 && d[0] == 0xFF && d[1] == 0xD8 && d[2] == 0xFF) return "image/jpeg";
-    if (n >= 4 && !memcmp(d, "GIF8", 4)) return "image/gif";
-    if (n >= 12 && !memcmp(d, "RIFF", 4) && !memcmp(d + 8, "WEBP", 4)) return "image/webp";
-    if (n >= 2 && d[0] == 'B' && d[1] == 'M') return "image/bmp";
-    return "application/octet-stream";
 }
 
 static int mime_ok(const char *m)
@@ -229,7 +350,9 @@ cp_payload *cp_payload_image(const uint8_t *data, size_t n, const char *mime)
     if (!data || n == 0)
         return NULL;
     if (!mime || !*mime)
-        mime = sniff_image_mime(data, n);
+        mime = cp_image_mime_sniff(data, n);
+    if (!mime)
+        mime = "application/octet-stream";
     if (!mime_ok(mime))
         return NULL;
     snprintf(meta, sizeof meta, "mime=%s\n", mime);
@@ -254,32 +377,41 @@ cp_payload *cp_payload_files(size_t count, const char *const *names, const uint8
     uint8_t *body;
     int all_compressed = 1;
     char meta[64];
-    cp_payload *p;
+    char **clean;
+    cp_payload *p = NULL;
 
     if (count == 0 || count > CPO_MAX_FILES || !names || !sizes || !datas)
         return NULL;
+    clean = (char **)calloc(count, sizeof *clean);
+    if (!clean)
+        return NULL;
+    /* names are untrusted: sanitize and make them unique (same rules as the receiver) */
     for (i = 0; i < count; i++) {
-        size_t nl;
+        const char *bn;
         if (!names[i] || (sizes[i] && !datas[i]))
-            return NULL;
-        nl = strlen(base_name(names[i]));
-        if (nl > 0xFFFFu)
-            return NULL;
-        total += 2u + nl + 8u + sizes[i];
+            goto fail_names;
+        bn = base_name(names[i]);
+        clean[i] = (char *)malloc(CP_NAME_MAX + 1);
+        if (!clean[i])
+            goto fail_names;
+        cp_sanitize_name((const uint8_t *)bn, strlen(bn), clean[i], CP_NAME_MAX + 1);
+        cp_unique_name(clean[i], CP_NAME_MAX + 1, clean, i);
+    }
+    for (i = 0; i < count; i++) {
+        total += 2u + strlen(clean[i]) + 8u + sizes[i];
         if (sizes[i] > CP_MAX_TOTAL_BYTES || total > CP_MAX_TOTAL_BYTES)
-            return NULL;
-        if (!(compressed_ext(names[i]) || cp_is_compressed_magic(datas[i], (size_t)sizes[i])))
+            goto fail_names;
+        if (!(compressed_ext(clean[i]) || cp_is_compressed_magic(datas[i], (size_t)sizes[i])))
             all_compressed = 0;
     }
     body = (uint8_t *)malloc(total ? (size_t)total : 1);
     if (!body)
-        return NULL;
+        goto fail_names;
     for (i = 0; i < count; i++) {
-        const char *bn = base_name(names[i]);
-        size_t nl = strlen(bn);
+        size_t nl = strlen(clean[i]);
         cp_be16w(body + off, (uint16_t)nl);
         off += 2;
-        memcpy(body + off, bn, nl);
+        memcpy(body + off, clean[i], nl);
         off += nl;
         cp_be64w(body + off, sizes[i]);
         off += 8;
@@ -290,6 +422,10 @@ cp_payload *cp_payload_files(size_t count, const char *const *names, const uint8
     snprintf(meta, sizeof meta, "count=%u\n", (unsigned)count);
     p = build(CP_KIND_FILES, meta, body, off, !all_compressed);
     free(body);
+fail_names:
+    for (i = 0; i < count; i++)
+        free(clean[i]);
+    free(clean);
     return p;
 }
 
@@ -316,6 +452,20 @@ void cp_payload_info_get(const cp_payload *p, cp_payload_info *out)
     out->raw_len = p->raw_len;
     out->container_len = p->n;
     out->compressed = p->compressed;
+    out->method = p->method;
+}
+
+const char *cp_comp_name(int method)
+{
+    switch (method) {
+    case CP_COMP_HUFFMAN: return "deflate-huffman";
+    case CP_COMP_RLE: return "deflate-rle";
+    case CP_COMP_FAST: return "deflate-1";
+    case CP_COMP_DEFAULT: return "deflate-6";
+    case CP_COMP_FILTERED: return "deflate-filtered";
+    case CP_COMP_MAX: return "deflate-9";
+    }
+    return "store";
 }
 
 void cp_payload_free(cp_payload *p)

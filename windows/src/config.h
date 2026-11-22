@@ -1,24 +1,33 @@
 /* config.h - all user settings (PLAN.md §6.2) and INI persistence (§6.8).
  *
- * The INI lives next to the exe (codetrans.ini, portable). If that directory
- * is not writable we fall back to %APPDATA%\CodeTrans\codetrans.ini.
+ * The INI lives in the user's profile: %APPDATA%\CodeTrans\codetrans.ini. A
+ * codetrans.ini next to the exe (earlier versions) is copied there once; the
+ * exe directory is only used when the profile folder is not writable.
  * "开机自启" is not stored in the INI: the HKCU Run value is the source of
  * truth (autostart_is_enabled / autostart_set). */
 #ifndef CPW_CONFIG_H
 #define CPW_CONFIG_H
 
 #include <windows.h>
+#include "cp.h"
 
 /* Decimen v3 comes in two outer codes: Cauchy RS-96 (0.5.3-fixed, faster under
  * loss, needs a receiver that knows flag 0x02) and the stock v0.5.3 LT carousel
  * (any v3 receiver, e.g. an unmodified decimen.app). */
-enum { CFG_PROTO_CODETRANS = 0, CFG_PROTO_DECIMEN3 = 1, CFG_PROTO_DECIMEN3_LT = 2 };
+/* The optical board protocols (experimental, CodeTrans receivers only) draw
+ * non-QR boards with the footprint of a version 40 code; QR version and ECC
+ * level do not apply to them. bands: 6 x 512 B per board, tiles: 24 x 108 B. */
+enum { CFG_PROTO_CODETRANS = 0, CFG_PROTO_DECIMEN3 = 1, CFG_PROTO_DECIMEN3_LT = 2,
+       CFG_PROTO_OB_BANDS = 3, CFG_PROTO_OB_TILES = 4, CFG_PROTO_COUNT = 5 };
 #define CFG_PROTO_IS_DECIMEN(p) ((p) == CFG_PROTO_DECIMEN3 || (p) == CFG_PROTO_DECIMEN3_LT)
+#define CFG_PROTO_IS_OB(p)      ((p) == CFG_PROTO_OB_BANDS || (p) == CFG_PROTO_OB_TILES)
+#define CFG_OB_VERSION          40      /* board side 177 modules = QR version 40 */
 enum { CFG_ECC_L = 0, CFG_ECC_M = 1, CFG_ECC_Q = 2, CFG_ECC_H = 3 };
-enum { CFG_IMG_PNG = 0, CFG_IMG_JPEG = 1 };
+/* AUTO: lossless PNG unless the picture is photo-like and JPEG is at least 2x smaller */
+enum { CFG_IMG_PNG = 0, CFG_IMG_JPEG = 1, CFG_IMG_AUTO = 2 };
 
-#define CFG_VERSION_MIN   5
-#define CFG_VERSION_MAX   40
+#define CFG_VERSION_MIN   CP_QR_VERSION_MIN
+#define CFG_VERSION_MAX   CP_QR_VERSION_MAX
 #define CFG_MODULE_MIN    1
 #define CFG_MODULE_MAX    16
 #define CFG_FPS_MIN       1
@@ -37,7 +46,7 @@ typedef struct app_settings {
     int  module_px;         /* 1..16 physical px      default 4          -> keep session */
     int  code_count;        /* 1/2/3/4/6              default 2          -> keep session */
     int  fps;               /* 1..60                  default 30         -> keep session */
-    int  image_format;      /* CFG_IMG_*              default PNG        -> new session */
+    int  image_format;      /* CFG_IMG_*              default Auto       -> new session */
     BOOL topmost;           /* default on */
     BOOL auto_popup;        /* default on */
     BOOL pause_monitor;     /* default off (also in tray) */
@@ -50,11 +59,19 @@ typedef struct app_settings {
     int  confirm_mb;        /* large-content confirm threshold, MB, default 20 */
     UINT snip_mods, snip_vk;          /* MOD_* (no MOD_NOREPEAT) + VK; default Win+Shift+S */
     UINT fallback_mods, fallback_vk;  /* used when the snip hotkey is taken; default Ctrl+Alt+S */
+    BOOL recv_auto_open;    /* camera receiver: open received text / images, show files; default on */
+    int  camera_index;      /* camera receiver: device index (C cycles), default 0 */
     /* --- UI state --- */
     BOOL settings_expanded; /* settings bar open */
     BOOL has_window_pos;
     int  window_x, window_y;
 } app_settings;
+
+/* QR version / ECC level that actually shape the frame (fixed for optical boards). */
+int  cfg_layout_version(const app_settings *s);
+int  cfg_layout_ecc(const app_settings *s);
+/* Payload bytes one code / board carries per refresh (status estimates). */
+size_t cfg_code_bytes(const app_settings *s);
 
 void config_defaults(app_settings *s);
 void config_validate(app_settings *s);   /* clamp everything into range */

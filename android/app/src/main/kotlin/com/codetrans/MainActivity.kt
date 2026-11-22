@@ -1,6 +1,7 @@
 package com.codetrans
 
 import android.Manifest
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -11,7 +12,7 @@ import android.os.PowerManager
 import android.util.Log
 import android.provider.Settings
 import android.text.util.Linkify
-import android.view.ViewGroup
+import android.view.MenuItem
 import android.view.WindowManager
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
@@ -25,7 +26,6 @@ import androidx.core.content.getSystemService
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.isVisible
-import androidx.core.view.updateLayoutParams
 import androidx.core.view.updatePadding
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -69,6 +69,14 @@ class MainActivity : AppCompatActivity() {
             updatePermissionView()
         }
 
+    /** Save of a single file: the user picks folder and name. */
+    private val createDocument =
+        registerForActivityResult(CreateTypedDocument()) { uri -> onSavePicked(uri) }
+
+    /** Save of several files: the user picks a folder. */
+    private val pickFolder =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri -> onSavePicked(uri) }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge(statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT))
         super.onCreate(savedInstanceState)
@@ -82,17 +90,27 @@ class MainActivity : AppCompatActivity() {
         }
 
         applyInsets()
+        b.toolbar.menu.findItem(R.id.action_diagnostics)?.let {
+            it.isVisible = BuildConfig.DEBUG
+            showDiagnosticsState(it)
+        }
         b.toolbar.setOnMenuItemClickListener { item ->
-            if (item.itemId == R.id.action_settings) {
-                startActivity(Intent(this, SettingsActivity::class.java))
-                true
-            } else {
-                false
+            when (item.itemId) {
+                R.id.action_settings -> startActivity(Intent(this, SettingsActivity::class.java))
+                R.id.action_send -> startActivity(Intent(this, SendActivity::class.java))
+                R.id.action_diagnostics -> {
+                    vm.diagnosticsEnabled = !vm.diagnosticsEnabled
+                    showDiagnosticsState(item)
+                }
+                else -> return@setOnMenuItemClickListener false
             }
+            true
         }
         b.share.setOnClickListener {
             if (!ShareHelper.share(this, shownResult)) snackbar(UiEvent(R.string.msg_share_failed))
         }
+        b.save.setOnClickListener { startSave() }
+        b.preview.resetButton.setOnClickListener { shownResult?.let { vm.clearResult(it.id) } }
         b.camera.permissionButton.setOnClickListener { onPermissionButton() }
 
         camera = CameraController(
@@ -108,7 +126,14 @@ class MainActivity : AppCompatActivity() {
                 launch { vm.state.collect(::render) }
                 launch { combine(vm.state, vm.detection, ::Pair).collect { (s, d) -> renderStatus(s, d) } }
                 launch { vm.codes.collect { b.camera.codeOverlay.setCodes(it) } }
+                launch { vm.frameInfo.collect(::renderFrameInfo) }
                 launch { vm.events.collect(::snackbar) }
+                if (BuildConfig.DEBUG) launch {
+                    vm.diagnostics.collect { text ->
+                        b.camera.diagPanel.isVisible = text != null
+                        b.camera.diagPanel.text = text
+                    }
+                }
             }
         }
 
@@ -245,7 +270,9 @@ class MainActivity : AppCompatActivity() {
         when {
             state is ScanState.Receiving -> {
                 o.statusOverlay.isVisible = true
-                o.progress.setProgressCompat(state.progress.permille, true)
+                // No animation: progress now arrives at up to 30 Hz, and the indicator's spring
+                // (stiffness 50) trailed it by ~0.3 s, so the bar visibly lagged the transfer.
+                o.progress.setProgressCompat(state.progress.permille, false)
                 val status = Formatters.status(state.progress, statusLabels)
                 o.statusText.text = if (d.stuck) status + "\n" + getString(R.string.detect_stuck_short) else status
             }
@@ -266,12 +293,51 @@ class MainActivity : AppCompatActivity() {
         val hint = if (state is ScanState.Error) state.message else R.string.hint_idle
         renderPreview(state.result, hint)
         shownResult = state.result
-        b.share.isEnabled = state.result != null
+        val has = state.result != null
+        b.share.isEnabled = has
+        b.save.isEnabled = has
+        b.preview.resetButton.isVisible = has
+    }
+
+    /** Frame rate and analysis resolution in the top-left corner of the camera view. */
+    private fun renderFrameInfo(info: FrameInfo?) {
+        val v = b.camera.fpsOverlay
+        v.isVisible = info != null
+        if (info != null) v.text = Formatters.frameInfo(info)
+    }
+
+    /** The diagnostics toolbar button: bright while the panel is expanded, dimmed while collapsed. */
+    private fun showDiagnosticsState(item: MenuItem) {
+        item.setIcon(if (vm.diagnosticsEnabled) R.drawable.ic_diagnostics else R.drawable.ic_diagnostics_off)
+    }
+
+    // ---- save (system file picker)
+
+    private fun startSave() {
+        val plan = SaveRules.plan(shownResult)
+        vm.pendingSave = plan.takeIf { it != SavePlan.None }
+        try {
+            when (plan) {
+                is SavePlan.One -> createDocument.launch(plan)
+                is SavePlan.Many -> pickFolder.launch(null)
+                SavePlan.None -> snackbar(UiEvent(R.string.msg_save_nothing))
+            }
+        } catch (e: ActivityNotFoundException) {
+            Log.w("CodeTrans", "no file picker", e)
+            vm.pendingSave = null
+            snackbar(UiEvent(R.string.msg_save_error))
+        }
+    }
+
+    /** [uri]: where the user wants it, null if the picker was cancelled. */
+    private fun onSavePicked(uri: Uri?) {
+        if (uri != null) vm.save(uri) else vm.pendingSave = null
     }
 
     private val statusLabels by lazy {
         StatusLabels(
             protoPlain = getString(R.string.proto_plain),
+            protoOb = getString(R.string.proto_ob),
             kindText = getString(R.string.kind_text),
             kindImage = getString(R.string.kind_image),
             kindFiles = getString(R.string.kind_files_short),
@@ -293,6 +359,7 @@ class MainActivity : AppCompatActivity() {
         p.filesList.removeAllViews()
 
         if (r == null) {
+            p.textView.text = null
             p.cardTitle.setText(R.string.preview_title)
             p.hintText.setText(hint)
             return
@@ -373,23 +440,18 @@ class MainActivity : AppCompatActivity() {
     private fun snackbar(e: UiEvent) {
         val text = if (e.arg != null) getString(e.text, e.arg) else getString(e.text)
         Snackbar.make(b.root, text, if (e.long) Snackbar.LENGTH_LONG else Snackbar.LENGTH_SHORT)
-            .setAnchorView(b.share)
+            .setAnchorView(b.actions)
             .show()
     }
 
     // ---- edge-to-edge (targetSdk 35+ enforces it)
 
     private fun applyInsets() {
-        val fabMargin = resources.getDimensionPixelSize(R.dimen.fab_margin)
         ViewCompat.setOnApplyWindowInsetsListener(b.root) { _, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
             b.toolbar.updatePadding(left = bars.left, top = bars.top, right = bars.right)
+            // The Save / Share rows live inside content, so its padding keeps them clear of the bars.
             b.content.updatePadding(left = bars.left, right = bars.right, bottom = bars.bottom)
-            b.share.updateLayoutParams<ViewGroup.MarginLayoutParams> {
-                bottomMargin = fabMargin + bars.bottom
-                rightMargin = fabMargin + bars.right
-                marginEnd = fabMargin + bars.right
-            }
             insets
         }
     }

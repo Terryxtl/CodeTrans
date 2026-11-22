@@ -2,7 +2,6 @@
 #include "producer.h"
 #include "app.h"
 #include "config.h"
-#include "frame_render.h"
 #include "dbglog.h"
 #include "util.h"
 #include <stdlib.h>
@@ -27,7 +26,7 @@ static struct {
     int                ring_target;  /* slots to keep filled          */
     int                head, count;
     size_t             frame_bytes;
-    frame_geom         geom;
+    cp_frame_geom      geom;
     BOOL               busy;         /* preparing or playing          */
 } P;
 
@@ -49,10 +48,10 @@ static int ring_depth(int fps)
 /* lock held */
 static BOOL ring_relayout(const job_params *p)
 {
-    frame_geom g;
+    cp_frame_geom g;
     size_t fb;
     int cap = ring_depth(p->fps);
-    frame_geom_calc(&g, p->version, p->count, p->quiet);
+    cp_frame_geom_calc(&g, p->version, p->count, p->quiet, 0, 4);   /* DIB rows: DWORD aligned */
     fb = (size_t)g.stride * g.h;
     P.head = P.count = 0;
     if (fb != P.frame_bytes || cap > P.ring_cap) {
@@ -105,19 +104,27 @@ static cp_tx *make_session(const content *c, const job_params *p, cp_payload **o
         post_status(&st);
         return NULL;
     }
-    if (CFG_PROTO_IS_DECIMEN(p->proto)) {
+    if (CFG_PROTO_IS_OB(p->proto)) {
+        /* optical board: carries the CPO1 container itself, fixed board size */
+        cp_tx_opts o;
+        memset(&o, 0, sizeof o);
+        o.ob_profile = p->proto == CFG_PROTO_OB_TILES ? CP_OB_TILES : CP_OB_BANDS;
+        tx = cp_tx_new(CP_PROTO_OB, br.payload, 0, &o);
+    } else if (CFG_PROTO_IS_DECIMEN(p->proto)) {
         /* Decimen v3: every frame fills the QR version at the chosen ECC level */
         cp_tx_opts o;
         memset(&o, 0, sizeof o);
         o.d3_fec = p->proto == CFG_PROTO_DECIMEN3_LT ? CP_D3_FEC_LT : CP_D3_FEC_RS96;
-        tx = cp_tx_new(CP_PROTO_D3, br.payload, qr_byte_capacity(p->version, p->ecc), &o);
+        tx = cp_tx_new(CP_PROTO_D3, br.payload, cp_qr_capacity(p->version, p->ecc), &o);
     } else {
-        tx = cp_tx_new(CP_PROTO_RQ, br.payload, qr_byte_capacity(p->version, p->ecc), NULL);
+        tx = cp_tx_new(CP_PROTO_RQ, br.payload, cp_qr_capacity(p->version, p->ecc), NULL);
     }
     if (!tx) {
         cp_payload_free(br.payload);
         st.state = JOB_ERROR;
-        if (CFG_PROTO_IS_DECIMEN(p->proto))
+        if (CFG_PROTO_IS_OB(p->proto))
+            wfmt(st.err, CPW_COUNTOF(st.err), L"无法建立光传码面会话(内容为空或超过 64 MB)");
+        else if (CFG_PROTO_IS_DECIMEN(p->proto))
             wfmt(st.err, CPW_COUNTOF(st.err), L"无法建立 Decimen 会话(内容为空、超过 64 MB,或二维码版本太小)");
         else
             wfmt(st.err, CPW_COUNTOF(st.err), L"无法建立发送会话(内容过大或二维码版本太小)");
@@ -202,9 +209,9 @@ static DWORD WINAPI producer_main(void *arg)
 
         /* render one frame outside the lock */
         {
-            frame_geom g = P.geom;
+            cp_frame_geom g = P.geom;
             size_t fb = P.frame_bytes;
-            int fixed_mask = cp.fps * g.count >= 90;
+            int fixed_mask = cp_fixed_mask(cp.fps, g.count);
             int ok;
             ReleaseSRWLockExclusive(&P.lock);
             if (scratch_cap < fb) {
@@ -214,7 +221,7 @@ static DWORD WINAPI producer_main(void *arg)
                     scratch_cap = fb;
                 }
             }
-            ok = scratch_cap >= fb && frame_render(tx, &g, cp.ecc, fixed_mask, scratch);
+            ok = scratch_cap >= fb && cp_tx_render_frame(tx, &g, cp.ecc, fixed_mask, scratch);
             if (!ok && cur) {
                 /* ESI space exhausted (≈70 h of playing) or a fatal error:
                  * start over with a fresh session of the same content. */
@@ -298,7 +305,7 @@ void producer_set_params(const job_params *p)
     ReleaseSRWLockExclusive(&P.lock);
 }
 
-int producer_pop(uint8_t **dst, size_t *cap, frame_geom *g)
+int producer_pop(uint8_t **dst, size_t *cap, cp_frame_geom *g)
 {
     int got = 0;
     AcquireSRWLockExclusive(&P.lock);

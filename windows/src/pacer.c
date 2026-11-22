@@ -3,7 +3,6 @@
 #include "app.h"
 #include "compat.h"
 #include "producer.h"
-#include "qr_geom.h"
 #include "util.h"
 #include <dwmapi.h>
 #include <mmsystem.h>
@@ -27,7 +26,7 @@ static struct {
     CRITICAL_SECTION cs;          /* display buffer */
     uint8_t         *pix;
     size_t           pix_cap;
-    frame_geom       g;
+    cp_frame_geom    g;
     BOOL             has_frame;
     bmi2             bmi;
     double           refresh_hz;  /* pacer thread */
@@ -53,17 +52,10 @@ static double query_refresh_hz(void)
     return 60.0;
 }
 
-/* vblanks per frame for the DWM path */
-static int vblanks_per_frame(double hz, int fps)
-{
-    int n = (int)(hz / fps + 0.5);
-    return n < 1 ? 1 : n;
-}
-
 static void update_effective(BOOL dwm)
 {
     int fps = K.fps;
-    LONG eff = dwm ? (LONG)(K.refresh_hz * 10.0 / vblanks_per_frame(K.refresh_hz, fps) + 0.5) : fps * 10;
+    LONG eff = dwm ? (LONG)(cp_pace_effective_fps(fps, K.refresh_hz) * 10.0 + 0.5) : fps * 10;
     if (eff != K.eff_fps_x10) {
         InterlockedExchange(&K.eff_fps_x10, eff);
         PostMessageW(K.notify, WM_APP_FPS, (WPARAM)eff, 0);
@@ -175,7 +167,7 @@ static DWORD WINAPI pacer_main(void *arg)
 
         if (dwm) {
             double vblank = qpf / K.refresh_hz;
-            double frame = vblank * vblanks_per_frame(K.refresh_hz, K.fps);
+            double frame = vblank * cp_pace_vblanks(K.fps, K.refresh_hz);
             uint64_t t0 = qpc_now();
             if (period_set) {
                 timeEndPeriod(1);

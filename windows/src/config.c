@@ -11,6 +11,25 @@
 
 static wchar_t s_ini[MAX_PATH * 2];
 
+int cfg_layout_version(const app_settings *s)
+{
+    return CFG_PROTO_IS_OB(s->protocol) ? CFG_OB_VERSION : s->version;
+}
+
+int cfg_layout_ecc(const app_settings *s)
+{
+    return CFG_PROTO_IS_OB(s->protocol) ? CFG_ECC_L : s->ecc;
+}
+
+size_t cfg_code_bytes(const app_settings *s)
+{
+    if (s->protocol == CFG_PROTO_OB_BANDS)
+        return cp_ob_board_bytes(CP_OB_BANDS);
+    if (s->protocol == CFG_PROTO_OB_TILES)
+        return cp_ob_board_bytes(CP_OB_TILES);
+    return cp_qr_capacity(s->version, s->ecc);
+}
+
 void config_defaults(app_settings *s)
 {
     ZeroMemory(s, sizeof *s);
@@ -20,7 +39,7 @@ void config_defaults(app_settings *s)
     s->module_px = 4;
     s->code_count = 2;
     s->fps = 30;
-    s->image_format = CFG_IMG_PNG;
+    s->image_format = CFG_IMG_AUTO;
     s->topmost = TRUE;
     s->auto_popup = TRUE;
     s->pause_monitor = FALSE;
@@ -33,24 +52,24 @@ void config_defaults(app_settings *s)
     s->snip_vk = 'S';
     s->fallback_mods = MOD_CONTROL | MOD_ALT;
     s->fallback_vk = 'S';
+    s->recv_auto_open = TRUE;
+    s->camera_index = 0;
     s->settings_expanded = FALSE;
     s->has_window_pos = FALSE;
 }
 
 void config_validate(app_settings *s)
 {
-    if (s->protocol != CFG_PROTO_CODETRANS && !CFG_PROTO_IS_DECIMEN(s->protocol))
+    if (s->protocol < 0 || s->protocol >= CFG_PROTO_COUNT)
         s->protocol = CFG_PROTO_CODETRANS;
     s->version = CPW_CLAMP(s->version, CFG_VERSION_MIN, CFG_VERSION_MAX);
     s->ecc = CPW_CLAMP(s->ecc, CFG_ECC_L, CFG_ECC_H);
     s->module_px = CPW_CLAMP(s->module_px, CFG_MODULE_MIN, CFG_MODULE_MAX);
-    switch (s->code_count) {
-    case 1: case 2: case 3: case 4: case 6: break;
-    default: s->code_count = 2; break;
-    }
+    if (!cp_code_count_ok(s->code_count))
+        s->code_count = 2;
     s->fps = CPW_CLAMP(s->fps, CFG_FPS_MIN, CFG_FPS_MAX);
-    if (s->image_format != CFG_IMG_PNG && s->image_format != CFG_IMG_JPEG)
-        s->image_format = CFG_IMG_PNG;
+    if (s->image_format != CFG_IMG_PNG && s->image_format != CFG_IMG_JPEG && s->image_format != CFG_IMG_AUTO)
+        s->image_format = CFG_IMG_AUTO;
     s->jpeg_quality = CPW_CLAMP(s->jpeg_quality, CFG_JPEGQ_MIN, CFG_JPEGQ_MAX);
     s->quiet_zone = CPW_CLAMP(s->quiet_zone, CFG_QUIET_MIN, CFG_QUIET_MAX);
     s->confirm_mb = CPW_CLAMP(s->confirm_mb, 1, 256);
@@ -60,6 +79,8 @@ void config_validate(app_settings *s)
     s->force_builtin_snip = !!s->force_builtin_snip;
     s->skip_password_managers = !!s->skip_password_managers;
     s->settings_expanded = !!s->settings_expanded;
+    s->recv_auto_open = !!s->recv_auto_open;
+    s->camera_index = CPW_CLAMP(s->camera_index, 0, 63);
     if (s->snip_vk == 0 || s->snip_vk > 0xFE) {
         s->snip_mods = MOD_WIN | MOD_SHIFT;
         s->snip_vk = 'S';
@@ -93,21 +114,27 @@ static BOOL ensure_writable(const wchar_t *path)
 
 BOOL config_init(void)
 {
-    wfmt(s_ini, CPW_COUNTOF(s_ini), L"%lscodetrans.ini", exe_dir());
-    if (ensure_writable(s_ini))
-        return TRUE;
+    wchar_t appdata[MAX_PATH], legacy[MAX_PATH * 2];
+    wfmt(legacy, CPW_COUNTOF(legacy), L"%lscodetrans.ini", exe_dir());
 
-    wchar_t appdata[MAX_PATH];
+    /* The user's profile: %APPDATA%\CodeTrans\codetrans.ini */
     if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, SHGFP_TYPE_CURRENT, appdata)) ||
         GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH) > 0) {
         wchar_t dir[MAX_PATH * 2];
         wfmt(dir, CPW_COUNTOF(dir), L"%ls\\CodeTrans", appdata);
         CreateDirectoryW(dir, NULL);
         wfmt(s_ini, CPW_COUNTOF(s_ini), L"%ls\\codetrans.ini", dir);
+        /* earlier versions kept the INI next to the exe: take its settings over once */
+        if (GetFileAttributesW(s_ini) == INVALID_FILE_ATTRIBUTES &&
+            GetFileAttributesW(legacy) != INVALID_FILE_ATTRIBUTES)
+            CopyFileW(legacy, s_ini, TRUE);
         if (ensure_writable(s_ini))
             return TRUE;
     }
-    return FALSE;   /* keep the exe-dir path; reads still work, writes fail */
+
+    /* no usable profile folder: next to the exe */
+    lstrcpynW(s_ini, legacy, (int)CPW_COUNTOF(s_ini));
+    return ensure_writable(s_ini);   /* FALSE: reads still work, writes fail */
 }
 
 void config_set_path(const wchar_t *path)
@@ -233,6 +260,8 @@ void config_load(app_settings *s)
     get_str(L"Protocol", L"", b, CPW_COUNTOF(b));
     s->protocol = !_wcsicmp(b, L"DecimenV3")      ? CFG_PROTO_DECIMEN3
                 : !_wcsicmp(b, L"DecimenV3-LT")   ? CFG_PROTO_DECIMEN3_LT
+                : !_wcsicmp(b, L"CodeTransOptical-Bands") ? CFG_PROTO_OB_BANDS
+                : !_wcsicmp(b, L"CodeTransOptical-Tiles") ? CFG_PROTO_OB_TILES
                 : !_wcsicmp(b, L"CodeTrans")      ? CFG_PROTO_CODETRANS
                 : !_wcsicmp(b, L"CodePass")       ? CFG_PROTO_CODETRANS   /* pre-rename name */
                                                   : s->protocol;   /* missing / unknown: default */
@@ -247,8 +276,11 @@ void config_load(app_settings *s)
     s->module_px = get_int(L"ModulePx", s->module_px);
     s->code_count = get_int(L"Codes", s->code_count);
     s->fps = get_int(L"FPS", s->fps);
-    get_str(L"ImageFormat", L"PNG", b, CPW_COUNTOF(b));
-    s->image_format = (!_wcsicmp(b, L"JPEG") || !_wcsicmp(b, L"JPG")) ? CFG_IMG_JPEG : CFG_IMG_PNG;
+    get_str(L"ImageFormat", L"", b, CPW_COUNTOF(b));
+    s->image_format = (!_wcsicmp(b, L"JPEG") || !_wcsicmp(b, L"JPG")) ? CFG_IMG_JPEG
+                    : !_wcsicmp(b, L"PNG")                            ? CFG_IMG_PNG
+                    : !_wcsicmp(b, L"Auto")                           ? CFG_IMG_AUTO
+                                                                      : s->image_format;   /* missing: default */
     s->jpeg_quality = get_int(L"JpegQuality", s->jpeg_quality);
     s->topmost = get_int(L"Topmost", s->topmost);
     s->auto_popup = get_int(L"AutoPopup", s->auto_popup);
@@ -269,6 +301,8 @@ void config_load(app_settings *s)
         s->fallback_vk = 'S';
     }
 
+    s->recv_auto_open = get_int(L"RecvAutoOpen", s->recv_auto_open);
+    s->camera_index = get_int(L"CameraIndex", s->camera_index);
     s->settings_expanded = get_int(L"SettingsExpanded", s->settings_expanded);
     get_str(L"WindowX", L"", b, CPW_COUNTOF(b));
     wchar_t by[64];
@@ -288,13 +322,16 @@ BOOL config_save(const app_settings *s)
     BOOL ok = TRUE;
     ok &= put_str(L"Protocol", s->protocol == CFG_PROTO_DECIMEN3      ? L"DecimenV3"
                              : s->protocol == CFG_PROTO_DECIMEN3_LT   ? L"DecimenV3-LT"
+                             : s->protocol == CFG_PROTO_OB_BANDS      ? L"CodeTransOptical-Bands"
+                             : s->protocol == CFG_PROTO_OB_TILES      ? L"CodeTransOptical-Tiles"
                                                                       : L"CodeTrans");
     ok &= put_int(L"Version", s->version);
     ok &= put_str(L"ECC", ecc[CPW_CLAMP(s->ecc, 0, 3)]);
     ok &= put_int(L"ModulePx", s->module_px);
     ok &= put_int(L"Codes", s->code_count);
     ok &= put_int(L"FPS", s->fps);
-    ok &= put_str(L"ImageFormat", s->image_format == CFG_IMG_JPEG ? L"JPEG" : L"PNG");
+    ok &= put_str(L"ImageFormat", s->image_format == CFG_IMG_JPEG ? L"JPEG"
+                                : s->image_format == CFG_IMG_AUTO ? L"Auto" : L"PNG");
     ok &= put_int(L"JpegQuality", s->jpeg_quality);
     ok &= put_int(L"Topmost", s->topmost);
     ok &= put_int(L"AutoPopup", s->auto_popup);
@@ -307,6 +344,8 @@ BOOL config_save(const app_settings *s)
     ok &= put_str(L"SnipHotkey", b);
     hotkey_format(s->fallback_mods, s->fallback_vk, b, CPW_COUNTOF(b));
     ok &= put_str(L"FallbackHotkey", b);
+    ok &= put_int(L"RecvAutoOpen", s->recv_auto_open);
+    ok &= put_int(L"CameraIndex", s->camera_index);
     ok &= put_int(L"SettingsExpanded", s->settings_expanded);
     if (s->has_window_pos) {
         ok &= put_int(L"WindowX", s->window_x);

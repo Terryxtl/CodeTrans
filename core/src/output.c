@@ -1,45 +1,59 @@
 /* Untrusted file name sanitization + unique naming. See PROTOCOL.md §6. */
 #include "cp_internal.h"
 
-static int ascii_lower(int c) { return (c >= 'A' && c <= 'Z') ? c - 'A' + 'a' : c; }
-
-static int ieq(const char *a, const char *b)
+/* Simple 1:1 case folding for name comparison: ASCII, Latin-1, Latin Extended-A,
+ * Greek and basic Cyrillic. NTFS and Android shared storage compare names
+ * case-insensitively beyond ASCII. */
+static uint32_t fold(uint32_t c)
 {
-    while (*a && *b && ascii_lower((unsigned char)*a) == ascii_lower((unsigned char)*b)) {
-        a++;
-        b++;
+    if (c < 0x80)
+        return (c >= 'A' && c <= 'Z') ? c + 32 : c;
+    if (c >= 0xC0 && c <= 0xDE)                              /* Latin-1 */
+        return c == 0xD7 ? c : c + 32;
+    if (c >= 0x100 && c <= 0x17F) {                          /* Latin Extended-A */
+        if (c == 0x178)
+            return 0xFF;
+        if ((c >= 0x139 && c <= 0x148) || (c >= 0x179 && c <= 0x17E))
+            return (c & 1) ? c + 1 : c;                      /* upper case is odd */
+        if (c == 0x130 || c == 0x131 || c == 0x138 || c == 0x149 || c == 0x17F)
+            return c;                                        /* no simple pair */
+        return (c & 1) ? c : c + 1;                          /* upper case is even */
     }
-    return *a == 0 && *b == 0;
+    if (c >= 0x386 && c <= 0x3AB) {                          /* Greek */
+        if (c == 0x386) return 0x3AC;
+        if (c >= 0x388 && c <= 0x38A) return c + 37;
+        if (c == 0x38C) return 0x3CC;
+        if (c == 0x38E || c == 0x38F) return c + 63;
+        if ((c >= 0x391 && c <= 0x3A1) || (c >= 0x3A3 && c <= 0x3AB)) return c + 32;
+        return c;
+    }
+    if (c == 0x3C2)
+        return 0x3C3;                                        /* final sigma */
+    if (c >= 0x400 && c <= 0x40F)                            /* Cyrillic */
+        return c + 80;
+    if (c >= 0x410 && c <= 0x42F)
+        return c + 32;
+    if ((c >= 0x460 && c <= 0x481) || (c >= 0x48A && c <= 0x4BF) || (c >= 0x4D0 && c <= 0x52F))
+        return (c & 1) ? c : c + 1;
+    return c;
 }
 
-/* Decodes one UTF-8 code point; returns its length or 0 if invalid. */
-static size_t utf8_decode(const uint8_t *s, size_t n, uint32_t *cp)
+/* case-insensitive equality of two UTF-8 strings (invalid bytes compare as-is) */
+static int ieq(const char *a, const char *b)
 {
-    uint32_t c;
-    size_t len, i;
-    if (n == 0)
-        return 0;
-    c = s[0];
-    if (c < 0x80) {
-        *cp = c;
-        return 1;
-    }
-    if ((c & 0xE0) == 0xC0) { len = 2; c &= 0x1F; }
-    else if ((c & 0xF0) == 0xE0) { len = 3; c &= 0x0F; }
-    else if ((c & 0xF8) == 0xF0) { len = 4; c &= 0x07; }
-    else return 0;
-    if (n < len)
-        return 0;
-    for (i = 1; i < len; i++) {
-        if ((s[i] & 0xC0) != 0x80)
+    const uint8_t *x = (const uint8_t *)a, *y = (const uint8_t *)b;
+    size_t nx = strlen(a), ny = strlen(b);
+    while (nx && ny) {
+        uint32_t cx = 0, cy = 0;
+        size_t lx = cp_utf8_decode(x, nx, &cx), ly = cp_utf8_decode(y, ny, &cy);
+        if (!lx) { cx = 0x110000u + *x; lx = 1; }
+        if (!ly) { cy = 0x110000u + *y; ly = 1; }
+        if (fold(cx) != fold(cy))
             return 0;
-        c = (c << 6) | (s[i] & 0x3F);
+        x += lx; nx -= lx;
+        y += ly; ny -= ly;
     }
-    if ((len == 2 && c < 0x80) || (len == 3 && c < 0x800) || (len == 4 && (c < 0x10000 || c > 0x10FFFF)) ||
-        (c >= 0xD800 && c <= 0xDFFF))
-        return 0;   /* overlong / surrogate / out of range */
-    *cp = c;
-    return len;
+    return nx == 0 && ny == 0;
 }
 
 static int is_dropped(uint32_t c)
@@ -111,7 +125,7 @@ void cp_sanitize_name(const uint8_t *in, size_t n, char *out, size_t cap)
     /* 1. code point filter */
     while (i < n) {
         uint32_t c = 0;
-        size_t l = utf8_decode(in + i, n - i, &c);
+        size_t l = cp_utf8_decode(in + i, n - i, &c);
         if (l == 0) {
             buf[bl++] = '_';
             i++;

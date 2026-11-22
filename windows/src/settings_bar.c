@@ -7,7 +7,6 @@
  * writes the INI). */
 #include "app.h"
 #include "compat.h"
-#include "qr_geom.h"
 #include "util.h"
 #include <commctrl.h>
 #include <stdlib.h>
@@ -65,6 +64,8 @@ static void create_controls(void)
     combo_add(B.proto, L"CodeTrans");
     combo_add(B.proto, L"Decimen v3 · RS96");
     combo_add(B.proto, L"Decimen v3 · LT");
+    combo_add(B.proto, L"光传码面 · 横带(实验)");   /* CFG_PROTO_OB_BANDS */
+    combo_add(B.proto, L"光传码面 · 分块(实验)");   /* CFG_PROTO_OB_TILES */
     B.l_version = mk_label(L"版本", ID_L_VERSION);
     B.version = mk_combo(ID_VERSION);
     for (int v = CFG_VERSION_MIN; v <= CFG_VERSION_MAX; v++) {
@@ -100,6 +101,7 @@ static void create_controls(void)
     B.image = mk_combo(ID_IMAGE);
     combo_add(B.image, L"PNG");
     combo_add(B.image, L"JPEG");
+    combo_add(B.image, L"自动");   /* CFG_IMG_AUTO: photos as JPEG, screenshots as PNG */
     B.topmost = mk(L"BUTTON", L"置顶", BS_AUTOCHECKBOX | WS_TABSTOP, ID_TOPMOST);
     B.popup = mk(L"BUTTON", L"自动弹出", BS_AUTOCHECKBOX | WS_TABSTOP, ID_POPUP);
     B.pause = mk(L"BUTTON", L"暂停监听", BS_AUTOCHECKBOX | WS_TABSTOP, ID_PAUSE);
@@ -224,8 +226,12 @@ void settings_bar_update_capacity(void)
 {
     wchar_t b[24];
     const app_settings *s = &g_app.cfg;
-    wfmt(b, CPW_COUNTOF(b), L"%uB", (unsigned)qr_byte_capacity(s->version, s->ecc));
+    BOOL ob = CFG_PROTO_IS_OB(s->protocol);
+    /* boards: per-board payload; size and ECC are fixed by the format */
+    wfmt(b, CPW_COUNTOF(b), ob ? L"%uB/面" : L"%uB", (unsigned)cfg_code_bytes(s));
     SetWindowTextW(B.cap, b);
+    EnableWindow(B.version, !ob);
+    EnableWindow(B.ecc, !ob);
 }
 
 void settings_bar_sync(void)
@@ -268,8 +274,10 @@ static void on_command(int id, int code, HWND ctl)
         if (code != CBN_SELCHANGE)
             return;
         s->protocol = (int)SendMessageW(ctl, CB_GETCURSEL, 0, 0);
-        /* each family has its own default size (RS96 <-> LT keeps the version) */
-        if (CFG_PROTO_IS_DECIMEN(s->protocol) != CFG_PROTO_IS_DECIMEN(old.protocol))
+        /* each QR family has its own default size (RS96 <-> LT keeps the version);
+         * optical boards have a fixed size and leave the QR version alone */
+        if (!CFG_PROTO_IS_OB(s->protocol) && !CFG_PROTO_IS_OB(old.protocol) &&
+            CFG_PROTO_IS_DECIMEN(s->protocol) != CFG_PROTO_IS_DECIMEN(old.protocol))
             s->version = CFG_PROTO_IS_DECIMEN(s->protocol) ? 40 : 25;
         break;
     case ID_VERSION:
@@ -326,7 +334,7 @@ static void on_command(int id, int code, HWND ctl)
     }
     config_validate(s);
     if (memcmp(&old, s, sizeof old) != 0) {
-        if (s->version != old.version || s->ecc != old.ecc) {
+        if (s->version != old.version || s->ecc != old.ecc || s->protocol != old.protocol) {
             B.syncing = TRUE;
             SendMessageW(B.version, CB_SETCURSEL, (WPARAM)(s->version - CFG_VERSION_MIN), 0);
             B.syncing = FALSE;

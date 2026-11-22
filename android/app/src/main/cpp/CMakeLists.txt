@@ -23,15 +23,6 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CPA_OPT -O3 -fvisibility=hidden -ffunction-sections -fdata-sections)
 
 # ---- third party ---------------------------------------------------------
-set(CMAKE_CXX_STANDARD 20)
-set(ZXING_READERS ON)
-set(ZXING_WRITERS OFF)
-set(ZXING_C_API OFF)
-foreach(format 1D AZTEC DATAMATRIX MAXICODE PDF417)
-  set(ZXING_ENABLE_${format} OFF)
-endforeach()
-add_subdirectory(third_party/zxing-cpp/core EXCLUDE_FROM_ALL)
-target_compile_options(ZXing PRIVATE ${CPA_OPT})
 
 add_library(cpa_nanorq STATIC
   ${TP}/nanorq/lib/chooser.c
@@ -77,20 +68,35 @@ add_library(cpa_core STATIC
   ${CP_CORE}/src/d3.c
   ${CP_CORE}/src/fec_rq.c
   ${CP_CORE}/src/frame_cp.c
+  ${CP_CORE}/src/ob.c
+  ${CP_CORE}/src/ob_fec.c
+  ${CP_CORE}/src/ob_locate.c
   ${CP_CORE}/src/output.c
   ${CP_CORE}/src/platform.c
   ${CP_CORE}/src/rx.c
   ${CP_CORE}/src/sha256.c
   ${CP_CORE}/src/tx.c
+  ${CP_CORE}/src/tx_render.c
 )
 target_include_directories(cpa_core PUBLIC ${CP_CORE}/include PRIVATE ${CP_CORE}/src)
 target_compile_options(cpa_core PRIVATE ${CPA_OPT} -Wall -Wextra -Wno-unused-parameter)
-target_link_libraries(cpa_core PRIVATE cpa_nanorq cpa_miniz)
+target_link_libraries(cpa_core PRIVATE cpa_nanorq cpa_miniz cpa_qrcodegen)
 
 # ---- JNI library ---------------------------------------------------------
-add_library(codetrans SHARED jni_bridge.c scanner.c tracked_grid.c qr_fallback.cpp)
-target_compile_definitions(codetrans PRIVATE CP_WITH_ZXING)
-target_link_libraries(codetrans PRIVATE ZXing::ZXing)
+add_library(cpa_qrcodegen STATIC ${TP}/qrcodegen/qrcodegen.c)
+target_include_directories(cpa_qrcodegen PUBLIC ${TP}/qrcodegen)
+target_compile_options(cpa_qrcodegen PRIVATE ${CPA_OPT} -w)
+
+# The camera scanner (core/scan, shared with the Windows receiver) is compiled
+# into the JNI library itself so it sees CP_WITH_ZXING and qr_fallback.h.
+add_library(codetrans SHARED jni_bridge.c jni_tx.c
+  ${CP_CORE}/scan/scanner.c ${CP_CORE}/scan/tracked_grid.c
+  ${CP_CORE}/scan/quad_tracker.c ${CP_CORE}/scan/confirmed_regions.c)
+target_include_directories(codetrans PRIVATE ${CP_CORE}/scan ${CMAKE_CURRENT_SOURCE_DIR})
+include("${CP_CORE}/scan/qr_fallback.cmake")
+cp_enable_qr_fallback(codetrans)
+target_compile_options(ZXing PRIVATE ${CPA_OPT})
+target_link_libraries(codetrans PRIVATE cpa_qrcodegen)
 target_compile_options(codetrans PRIVATE ${CPA_OPT} -Wall -Wextra -Wno-unused-parameter)
 target_link_libraries(codetrans PRIVATE cpa_core cpa_quirc cpa_nanorq cpa_miniz log m)
 # 16 KB page alignment is the NDK r28+ default; stated explicitly for older NDKs.

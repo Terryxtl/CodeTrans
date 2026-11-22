@@ -14,7 +14,7 @@
  *   text.txt, plain.txt, file0.bin, file1.bin, files.txt   expected results
  *
  * Every generated sequence is verified here first with the real receiver
- * (android/app/src/main/cpp/scanner.c + core) so a test failure on the device
+ * (core/scan/scanner.c + core) so a test failure on the device
  * points at the Android side, not at the data.
  *
  * Build (any C11 host compiler), see README.md next to this file.

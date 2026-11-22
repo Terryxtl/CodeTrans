@@ -7,6 +7,7 @@ data class StatusLabels(
     val protoRq: String = "CodeTrans",
     val protoD3: String = "Decimen",
     val protoPlain: String = "QR",
+    val protoOb: String = "CodeTrans board",
     val kindText: String = "Text",
     val kindImage: String = "Image",
     val kindFiles: String = "Files",
@@ -31,6 +32,10 @@ object Formatters {
         else String.format(Locale.ROOT, "%d %s", v.toLong(), units[i])
     }
 
+    /** Camera overlay: "30.0 fps · 1920×1080". */
+    fun frameInfo(i: FrameInfo): String =
+        String.format(Locale.ROOT, "%.1f fps$SEP%d×%d", i.fps, i.width, i.height)
+
     /** protocol · kind · size · have/need · KB/s · N codes (unknown parts are omitted). */
     fun status(p: Progress, l: StatusLabels): String {
         val parts = ArrayList<String>(6)
@@ -38,6 +43,7 @@ object Formatters {
             NativeCore.PROTO_RQ -> parts += l.protoRq
             NativeCore.PROTO_D3 -> parts += l.protoD3
             NativeCore.PROTO_PLAIN -> parts += l.protoPlain
+            NativeCore.PROTO_OB -> parts += l.protoOb
         }
         when (p.kind) {
             NativeCore.KIND_TEXT -> parts += l.kindText

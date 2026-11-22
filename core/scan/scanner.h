@@ -26,7 +26,9 @@ void        cp_scanner_free(cp_scanner *s);
 
 /* y: tightly packed w*h luminance bytes (row stride == w).
  * Detects + decodes all QR codes, pushes each payload into rx (when rx != NULL)
- * and reports the decoded count via cp_rx_note_frame().
+ * and reports the decoded count via cp_rx_note_frame(). Also finds, tracks and
+ * decodes CodeTrans optical boards (cp_rx_push_board); they count towards
+ * cp_rx_note_frame() and appear in cp_scanner_last_quads(), not in *codes.
  * Returns the OR of CP_EV_* bits from cp_rx_push; *codes (optional) = codes decoded.
  * Returns 0 with *codes = -1 on invalid arguments / out of memory. */
 int cp_scanner_scan(cp_scanner *s, cp_rx *rx, const uint8_t *y, int w, int h, int *codes);
@@ -52,8 +54,9 @@ typedef void (*cp_scan_cb)(void *user, const uint8_t *payload, size_t n);
 void cp_scanner_set_callback(cp_scanner *s, cp_scan_cb cb, void *user);
 
 /* Contrast retry (Otsu + high-boost re-binarisation when a frame decodes
- * nothing): at most once per `ms` per scanner (default 100), 0 = every
- * frame, < 0 = off. cp_scanner_retry_hits counts frames it rescued. */
+ * nothing, or fewer codes than it located): at most once per `ms` per scanner
+ * (default 100), 0 = every frame, < 0 = off. cp_scanner_retry_hits counts
+ * frames it rescued (fully or partially). */
 void     cp_scanner_set_retry_interval(cp_scanner *s, int ms);
 unsigned cp_scanner_retry_hits(const cp_scanner *s);
 
